@@ -137,7 +137,7 @@ cd dsh-workspace-memory && node --test
 | 验收项 | 结果 | 证据 |
 |---|---|---|
 | A1 安装 | ✅ | `install_bundle` → `application: applied`、`warnings: []`；`Config.listConfigs` 返回 `enabled/autoExtract/maxIndexChars/debugLog` 四个 `x-cordis.volatile` 字段与默认值 |
-| A2 会话注入 | ✅（活会话） | 安装后同一个正在运行的会话，最新 `system/message` 含 `# Memory`，且带绝对记忆根 `D:\deep seek harness\chat task\.dsh\memory/`；`.dsh/memory/` 已被创建 |
+| A2 会话注入 | ✅（活会话） | 安装后同一个正在运行的会话，最新 `system/message` 含 `# Memory`，且带绝对记忆根 `<workspace>\.dsh\memory/`；`.dsh/memory/` 已被创建 |
 | A2' 插件热生效 | ✅ | 删除记忆目录后 `remove_bundle` + `install_bundle`，目录被重新创建，宿主日志无 `systemPrompt is unavailable`（`systemPrompt` 已声明为硬依赖） |
 | A4' 提取落盘（宿主侧） | ✅ | Lead 独立 E2E（`scripts/verify-host-e2e.mjs`）：14/14 通过 —— 事实文件 + `originSessionId` + `MEMORY.md` 指针、请求带 route/system/1200 maxTokens、direct-write 跳过、read-only 不建目录不提取、subagent 不注入不提取 |
 | A5 read-only | ✅ | 同上（不建目录、不提取、仍注入规则段） |
