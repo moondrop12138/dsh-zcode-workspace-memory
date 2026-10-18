@@ -1,0 +1,9 @@
+# dsh-workspace-memory bundle: ports ZCode's project/workspace memory to DSH.
+# The Host half injects a `# Memory` system section (rules + MEMORY.md index) into
+# every main session, writes/refreshes the per-workspace memory directory after a
+# successful turn, and serves the read-only catalog over its own Fetch RPC route.
+# The Client half adds the left-sidebar "Workspace memory" page.
+
+- insert:
+    - id: workspace-memory
+      name: 'dsh-workspace-memory'

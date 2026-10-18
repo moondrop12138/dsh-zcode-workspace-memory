@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Workspace memory">
+  <defs>
+    <linearGradient id="wm-surface" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b8def"/>
+      <stop offset="1" stop-color="#7b5bff"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="url(#wm-surface)"/>
+  <path d="M21 17h12.5a11.5 11.5 0 0 1 0 23H21z" fill="none" stroke="#ffffff" stroke-width="3.6"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M33.5 17v23" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round" opacity="0.55"/>
+  <circle cx="21" cy="17" r="3.1" fill="#ffffff"/>
+  <circle cx="21" cy="28.5" r="3.1" fill="#ffffff"/>
+  <circle cx="21" cy="40" r="3.1" fill="#ffffff"/>
+  <circle cx="44" cy="17" r="2.6" fill="#ffffff" opacity="0.9"/>
+  <circle cx="44" cy="40" r="2.6" fill="#ffffff" opacity="0.9"/>
+</svg>

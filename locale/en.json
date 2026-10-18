@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Workspace Memory",
+    "description": "ZCode-style workspace memory for DSH: one persistent Markdown memory per workspace (a MEMORY.md index plus one fact per file), injected into every main session and refreshed by background extraction after each successful turn. Can be disabled in the plugin settings."
+  }
+}
