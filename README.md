@@ -124,7 +124,7 @@ dsh plugin --profile <profile> add github:moondrop12138/dsh-zcode-workspace-memo
 ## 测试
 
 ```bash
-cd dsh-workspace-memory && node --test
+cd dsh-zcode-workspace-memory && node --test
 ```
 
 覆盖：路径与文件名安全、索引 frontmatter/注释剥离与双上限截断、指针 upsert/remove、
@@ -153,7 +153,7 @@ cd dsh-workspace-memory && node --test
 复现命令：
 
 ```bash
-cd dsh-workspace-memory
+cd dsh-zcode-workspace-memory
 node --test                        # 37 项纯函数/集成用例
 node scripts/verify-host-e2e.mjs   # 14 项宿主侧端到端断言
 node scripts/inspect-session.mjs <session.v4.jsonl.zstd>   # 检查某会话最新 system 段是否含 # Memory
@@ -168,6 +168,14 @@ node scripts/verify-memory-dir.mjs "<工作区绝对路径>"        # 用插件�
 - **索引指针可能悬空**：记忆文件被外部删除/改名后，插件不做修复器（与 ZCode 一致）；页面会显示实际存在的文件。
 - **记忆可见性**：`.dsh/memory/` 在仓库里，是否提交由你决定。
 - **UI 是只读的**：页面不提供编辑/删除；开关在插件设置里，记忆内容由模型或提取写入。
+
+## 许可证与上游
+
+- **本仓库第一方代码：MIT**（见 `LICENSE`）。
+- 记忆的提示词文本（`memoryRulesText` / `buildExtractionPrompt`）与记忆设计移植自
+  **ZCode**（[zai-org/ZCode](https://github.com/zai-org/ZCode)，Apache-2.0，Copyright 2026 Z.AI Co., Ltd）：
+  改了什么、没移植什么、哪些是重写而非照抄，见 [`NOTICE.md`](NOTICE.md)；该许可的副本是
+  [`LICENSE-Apache-2.0.txt`](LICENSE-Apache-2.0.txt)。
 
 ## 结构
 
