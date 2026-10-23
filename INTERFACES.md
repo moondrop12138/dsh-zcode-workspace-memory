@@ -35,12 +35,23 @@ Fallback when the header has no `cwd`: `process.cwd()`.
 ```text
 <workspaceRoot>/.dsh/memory/
   MEMORY.md              index; no frontmatter; one pointer line per memory
+  MEMORY.md.prev         rollback copy of the index, kept by automated writes
   <fact-name>.md         one durable fact per file, YAML frontmatter + Markdown body
 ```
 
 * `MEMORY.md` pointer line: `- [Title](fact-name.md) — hook` (em dash U+2014, one line, no
   frontmatter). Written by the model per the injected rules, and maintained by Host extraction
   (`upsertPointer` / `removePointer`).
+* Index writes are guarded (`evaluateIndexReplacement` in `lib/memory-core.js`): the current
+  index MUST be readable, and the planned index may only lose as many pointer lines as the run
+  explicitly forgets. An unreadable `MEMORY.md` aborts the run instead of being read as empty —
+  reading it as empty is what used to rewrite the file with a single pointer and drop every
+  other line, silently un-linking every other memory.
+* Before an automated write replaces the index, the previous text is written to
+  `MEMORY.md.prev` (one generation, overwritten each time).
+* Diagnostics go to `%TEMP%/workspace-memory-host.log` (log, not debug):
+  `read failed for <path> (<where: reason>)`, `index unreadable for <session> (<where: reason>); injecting rules only`,
+  `extraction aborted for <session>: index unreadable (...)`, `index write refused for <session>: ...`.
 * `<fact-name>.md` frontmatter (written by the model or by Host extraction):
 
   ```markdown

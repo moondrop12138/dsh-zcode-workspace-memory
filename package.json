@@ -1,6 +1,6 @@
 {
   "name": "dsh-workspace-memory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Workspace memory for DSH: a per-workspace Markdown memory directory (MEMORY.md index + one fact per file) injected into every main session and refreshed by background extraction, ported from ZCode",
   "type": "module",
   "main": "lib/host.js",

@@ -397,3 +397,25 @@ test('pickRoute follows configured → latest → agent → default precedence',
   assert.equal(pickRoute({ requestContext: { provider: 'p', model: '' } }), undefined)
   assert.equal(pickRoute(undefined), undefined)
 })
+
+import { evaluateIndexReplacement } from '../lib/memory-core.js'
+
+test('evaluateIndexReplacement refuses an index that silently loses pointers', () => {
+  const before = '- [A](a.md) - one' + String.fromCharCode(10) + '- [B](b.md) - two' + String.fromCharCode(10)
+  const after = '- [A](a.md) - one' + String.fromCharCode(10)
+  const verdict = evaluateIndexReplacement(before, after, [])
+  assert.equal(verdict.ok, false)
+  assert.equal(verdict.beforeCount, 2)
+  assert.equal(verdict.afterCount, 1)
+  assert.match(verdict.reason, /refusing to write/)
+})
+
+test('evaluateIndexReplacement allows growth and explicit forgets', () => {
+  const before = '- [A](a.md) - one' + String.fromCharCode(10) + '- [B](b.md) - two' + String.fromCharCode(10)
+  assert.equal(evaluateIndexReplacement(before, before + '- [C](c.md) - three' + String.fromCharCode(10), []).ok, true)
+  assert.equal(evaluateIndexReplacement(before, '- [A](a.md) - one' + String.fromCharCode(10), ['b.md']).ok, true)
+})
+
+test('evaluateIndexReplacement allows the very first index of a workspace', () => {
+  assert.equal(evaluateIndexReplacement('', '- [A](a.md) - one' + String.fromCharCode(10), []).ok, true)
+})
