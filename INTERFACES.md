@@ -132,12 +132,18 @@ ctx.systemPrompt.section({
 
 ---
 
+Sessions running the `minimal` preset are excluded from the read side: the host
+never initializes them, so `MEMORY.md` is not resolved or read and `text(...)`
+returns an empty string (the write side is excluded in section 5).
+
 ## 5. Host extraction (background, after a successful turn)
 
 * Trigger: `session/event` where `event.type === 'turn/end'` and
   `event.data.reason.kind === 'completed'`, observed on `agent.ctx`.
 * Gate: `enabled`, `autoExtract`, eligible session, and
   `ctx.sandboxPolicy.resolve({ session }).mode !== 'read-only'`.
+* Excluded: `session.header.agentPreset === 'minimal'` — a minimal run never
+  reads the index and never writes facts, the index, or `MEMORY.md.prev`.
 * Skip rules (ZCode parity, `evaluateExtraction`):
   * the turn contains a write/edit whose arguments mention the memory root → `direct-memory-write`;
   * no independent user text block with ≥ 3 word units → `no-user-prose`. One word unit is a

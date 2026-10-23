@@ -589,3 +589,76 @@ test('an index that lost pointer lines is repaired from the fact files', async (
     await rm(workspace, { recursive: true, force: true })
   }
 })
+
+test('a minimal session neither reads nor writes memory', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dwm-min-'))
+  try {
+    const fs = createFakeFs()
+    const memoryDir = join(workspace, '.dsh', 'memory')
+    const fact = '---\nname: alpha\ndescription: first fact\nmetadata:\n  node_type: memory\n  type: user\n---\nbody\n'
+    fs.files.set(join(memoryDir, 'MEMORY.md'), '- [Alpha](alpha.md) ' + '\u2014' + ' first fact\n')
+    fs.files.set(join(memoryDir, 'alpha.md'), fact)
+    const reads = []
+    const originalReadText = fs.readText
+    fs.readText = async (target) => {
+      reads.push(target.displayPath)
+      return originalReadText(target)
+    }
+    const agent = createFakeAgent('sess_minimal', workspace)
+    agent.session.header.agentPreset = 'minimal'
+    const calls = { llm: [] }
+    const services = {
+      systemPrompt: {
+        section: (section) => {
+          ctxRef.sections.push(section)
+          return () => {}
+        },
+      },
+      agents: { list: () => [agent] },
+      sessions: { list: () => [agent.session] },
+      fs,
+      sandboxPolicy: { resolve: () => ({ mode: 'workspace-write', workspaceRoot: workspace }) },
+      agentDefaultModel: { currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }) },
+      llm: {
+        stream: (options) => {
+          calls.llm.push(options)
+          return (async function* () {
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          })()
+        },
+      },
+    }
+    const ctxRef = createFakeCtx(services)
+
+    apply(ctxRef, {})
+    await new Promise((done) => setTimeout(done, 80))
+
+    // The index is never opened and the section stays empty.
+    assert.deepEqual(reads, [])
+    assert.equal(ctxRef.sections[0].text({ agent }), '')
+
+    // A completed turn with user prose extracts nothing and writes nothing.
+    const emit = (name, ...args) => {
+      for (const registered of ctxRef.handlers.get(name) ?? []) registered(...args)
+    }
+    emit('session/event', agent.session, { type: 'turn/start', data: { turn: 1 } })
+    emit('session/event', agent.session, {
+      type: 'user/message',
+      data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'please remember that I prefer tabs' }] },
+    })
+    emit('session/event', agent.session, {
+      type: 'assistant/message',
+      data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'Noted.' }] } },
+    })
+    emit('session/event', agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await new Promise((done) => setTimeout(done, 80))
+
+    assert.equal(calls.llm.length, 0)
+    assert.deepEqual(fs.writes, [])
+    assert.equal(fs.files.get(join(memoryDir, 'MEMORY.md')), '- [Alpha](alpha.md) ' + '\u2014' + ' first fact\n')
+    assert.equal(fs.files.has(join(memoryDir, 'alpha.md')), true)
+    ctxRef.disposeAll()
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})

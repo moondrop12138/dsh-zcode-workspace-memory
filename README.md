@@ -30,6 +30,7 @@
 | 落盘时机 | **惰性**：只有真的开过主会话的工作区才会 best-effort 创建 `.dsh/memory/` |
 | 子 Agent | **不生效**：`session.header.origin === 'subagent'`（subagent / workflow child / 队友）不注入、不提取 |
 | read-only 会话 | 半生效：规则段照常注入，但**不建目录、不提取**；模型写记忆按沙箱正常被拒（无绕过） |
+| 极简模式 | **完全不生效**：`session.header.agentPreset === 'minimal'` 的会话不读索引、不建目录、不注入、不提取，全程零 fs 调用 |
 | 计划模式 | 记忆写入沿用宿主工具策略，会被拦（与 ZCode 有意不同，见下） |
 | 其它 profile | 不装不生效；安装是 profile 级动作 |
 
