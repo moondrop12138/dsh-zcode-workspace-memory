@@ -557,3 +557,35 @@ test('apply degrades when optional services are missing', async () => {
   assert.doesNotThrow(() => apply(ctx, {}))
   ctx.disposeAll()
 })
+
+test('an index that lost pointer lines is repaired from the fact files', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'dwm-test-'))
+  try {
+    const fs = createFakeFs()
+    const memoryDir = join(workspace, '.dsh', 'memory')
+    const fact = (name, description, type) => '---\nname: ' + name + '\ndescription: ' + description
+      + '\nmetadata:\n  node_type: memory\n  type: ' + type + '\n---\nbody\n'
+    fs.files.set(join(memoryDir, 'MEMORY.md'), '- [Alpha](alpha.md) '+ '\u2014' + ' first fact\n')
+    fs.files.set(join(memoryDir, 'alpha.md'), fact('alpha', 'first fact', 'user'))
+    fs.files.set(join(memoryDir, 'beta.md'), fact('beta', 'second fact', 'project'))
+    const agent = createFakeAgent('sess_repair', workspace)
+    const services = {
+      systemPrompt: { section: (section) => { ctxRef.sections.push(section); return () => {} } },
+      agents: { list: () => [agent] },
+      sessions: { list: () => [agent.session] },
+      fs,
+      sandboxPolicy: { resolve: () => ({ mode: 'workspace-write', workspaceRoot: workspace }) },
+    }
+    const ctxRef = createFakeCtx(services)
+    apply(ctxRef, {})
+
+    const sectionText = () => (ctxRef.sections[0] ? ctxRef.sections[0].text({ agent }) : '')
+    assert.equal(await waitFor(() => sectionText().includes('beta.md')), true)
+    const index = fs.files.get(join(memoryDir, 'MEMORY.md'))
+    assert.match(index, /- \[Alpha\]\(alpha\.md\)/)
+    assert.match(index, /- \[Beta\]\(beta\.md\) \u2014 second fact/)
+    assert.match(fs.files.get(join(memoryDir, 'MEMORY.md.prev')), /\[Alpha\]/)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
