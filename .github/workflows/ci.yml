@@ -1,0 +1,26 @@
+# CI for `dsh-workspace-memory`. The repo has zero npm dependencies, so there
+# is no install step: each job syntax-checks, unit-tests and E2E-verifies with
+# plain node.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        node: [20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node scripts/check-syntax.mjs
+      - run: node --test
+      - run: node scripts/verify-host-e2e.mjs
