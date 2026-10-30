@@ -159,6 +159,28 @@ async function isDirectory(path) {
   }
 }
 
+/**
+ * Scripted model turn: optional text block plus zero or more tool calls.
+ * @param {string} text
+ * @param {Array<{ id: string, name: string, arguments: string }>} [toolCalls]
+ */
+function* streamTurn(text, toolCalls = []) {
+  let index = 0
+  if (text.length > 0) {
+    yield { type: 'block-start', index, blockType: 'text' }
+    yield { type: 'text-delta', index, text }
+    yield { type: 'block-end', index, block: { type: 'text', text } }
+    index += 1
+  }
+  for (const call of toolCalls) {
+    yield { type: 'block-start', index, blockType: 'tool-call' }
+    yield { type: 'tool-call-delta', index, id: call.id, name: call.name, argumentsDelta: call.arguments }
+    yield { type: 'block-end', index, block: { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments } }
+    index += 1
+  }
+  yield { type: 'finish', reason: { kind: toolCalls.length > 0 ? 'tool-calls' : 'stop' } }
+}
+
 const results = []
 const record = (name, ok, detail) => {
   results.push({ name, ok, detail })
@@ -412,6 +434,81 @@ const record = (name, ok, detail) => {
   record('dream-run sends the consolidation prompt to the model',
     harness.llmCalls.length > callsBefore,
     `${callsBefore} -> ${harness.llmCalls.length}`)
+  await rm(scratch, { recursive: true, force: true })
+}
+
+/* --------------------------- case 7: five-turn tool loop (0.4.0 agent mode) */
+
+{
+  const harness = createHarness({ reply: 'unused' })
+  const scratch = await mkdtemp(join(tmpdir(), 'wm-e2e-agent-'))
+  harness.agent.session.header.cwd = scratch
+  harness.ctx.get('sandboxPolicy').resolve = () => ({ mode: 'workspace-write', workspaceRoot: scratch })
+  const memoryRoot = join(scratch, MEMORY_ROOT_SUFFIX)
+  await mkdir(memoryRoot, { recursive: true })
+
+  // Script the model: one tool call, then a closing text turn.
+  const turns = [
+    streamTurn('', [{
+      id: 'call-1',
+      name: 'memory_write',
+      arguments: JSON.stringify({
+        name: 'e2e-agent-tabs',
+        title: 'E2E agent tabs',
+        type: 'project',
+        description: 'The e2e agent project indents with tabs',
+        body: 'The e2e agent project indents with tabs.',
+      }),
+    }]),
+    streamTurn('Saved the tab convention.'),
+  ]
+  const llm = harness.ctx.get('llm')
+  const liveStream = llm.stream.bind(llm)
+  llm.stream = (request) => {
+    harness.llmCalls.push(request)
+    const next = turns.shift()
+    if (next !== undefined) return next
+    return liveStream(request)
+  }
+
+  apply(harness.ctx, { enabled: true, autoExtract: true })
+  await delay(400)
+  emit(harness, 'session/event', harness.agent.session, { type: 'turn/start', data: { turn: 7 } })
+  emit(harness, 'session/event', harness.agent.session, {
+    type: 'user/message',
+    data: { content: [{ type: 'text', text: 'we still indent with tabs in this project, keep that' }], source: { kind: 'user' } },
+  })
+  emit(harness, 'session/event', harness.agent.session, {
+    type: 'assistant/message',
+    data: { message: { role: 'assistant', content: [{ type: 'text', text: 'Understood.' }] } },
+  })
+  emit(harness, 'session/event', harness.agent.session, { type: 'turn/end', data: { turn: 7, reason: { kind: 'completed' } } })
+
+  await waitFor(() => harness.llmCalls.length >= 2, 4000)
+  const names = (harness.llmCalls[0]?.tools ?? []).map((tool) => tool.name)
+  record('agent extraction sends the six memory tool schemas',
+    names.length === 6 && names.includes('memory_write') && names.includes('memory_grep'),
+    names.join(','))
+
+  const roundTrip = harness.llmCalls[1]?.messages?.at(-1)
+  record('the tool result is replayed as a tool message',
+    roundTrip?.source?.kind === 'tool'
+      && Array.isArray(roundTrip.content)
+      && roundTrip.content.every((block) => block.type === 'tool-result'),
+    JSON.stringify(roundTrip?.source ?? null))
+
+  const wrote = await waitFor(async () => {
+    try {
+      return (await readFile(join(memoryRoot, 'e2e-agent-tabs.md'), 'utf8')).includes('type: project')
+    } catch (_error) {
+      return false
+    }
+  }, 4000)
+  record('a tool write lands in the memory directory and the index', wrote, join(memoryRoot, 'e2e-agent-tabs.md'))
+  if (wrote) {
+    const index = await readFile(join(memoryRoot, 'MEMORY.md'), 'utf8')
+    record('the tool write updates the MEMORY.md pointer', index.includes('e2e-agent-tabs.md'), index.slice(0, 80))
+  }
   await rm(scratch, { recursive: true, force: true })
 }
 

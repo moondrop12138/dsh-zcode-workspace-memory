@@ -46,10 +46,21 @@ under the Apache License, Version 2.0. A copy of that license is included here a
   excerpts, the extraction cursor and per-preset memory roots. Upstream has no standalone module for
   these; only the behaviour was matched.
 
+### What was ported in 0.4.0 (Apache-2.0 §4(b) — modified)
+
+- **`lib/memory-agent.js`** — adapted from `packages/core/src/memory/memory-agent-loop.ts` and the
+  agent instructions in `memory/extraction.ts`: the restricted memory-tool set, the five-turn
+  budget, the "inspect before writing" instruction and the `Nothing to save.` convention. Changes:
+  ZCode spawns a real subagent with Read/Grep/Glob/read-only Bash and filesystem writes; DSH has no
+  plugin-side tool registration, so the loop is in-process — tool schemas travel as
+  `llm.stream({ tools })`, the Host executes each call against a journal, and tool results are
+  replayed as `tool-result` blocks. The journal is then applied through the same guarded write path
+  as the one-shot engine. The one-shot JSON request stays available (`extractionMode: 'json'`) and
+  is the fallback when the loop cannot finish.
+
 ### What remains deliberately not ported
 
-ZCode's five-turn extraction agent loop (`memory-agent-loop.ts`), the global kill-switch
-hierarchy, and the headless (`-p`) gating. See `README.md` §"与 ZCode 的差异".
+The global kill-switch hierarchy and the headless (`-p`) gating. See `README.md` §"与 ZCode 的差异".
 
 ### What was rewritten rather than copied
 

@@ -17,6 +17,7 @@
 | M3 | 0.1.6 | 0.2.0 | 记忆体验（面板 + 可见性） | 新增 RPC 端点，向后兼容 |
 | M4 | 0.2.0 | 0.2.0 | 契约升级：智能召回（D1 全局层已撤回，契约 v2.1） | INTERFACES.md v2.1 |
 | M5 | 0.3.0 | 0.3.0 | ZCode 能力对齐：相关记忆 / 检索分支 / Dream / 游标 / agent 记忆 | INTERFACES.md v2.2 |
+| M6 | 0.4.0 | 0.4.0 | 受限工具循环提取引擎（W6） | INTERFACES.md v2.3 |
 
 明确不做（当前版本范围外）：向量/embedding 检索、云端同步、多设备实时协作、记忆跨用户共享。
 
@@ -232,8 +233,29 @@
 
 `node --test` 304/304（22 套件）、`scripts/verify-host-e2e.mjs` 23/23、`check-syntax` 35/35、
 Windows + Linux × Node 20/22 四矩阵 CI；契约升到 v2.2（§2.6、§6.12）。
-明确不做的仍是硬约束：DSH 不允许插件注册写工具或受限工具循环，所以上游的
-`memory-agent-loop.ts` 不搬——这一项在「完全对齐」里是等价替代，不是缺口。
+
+---
+
+## M6 — 受限工具循环提取引擎（v0.4.0，2026-10-31）
+
+> 起因：M5 把 `memory-agent-loop.ts` 记成「硬约束下不可搬」。用户指出 DSH 允许插件注册工具；
+> 复核后确认 `ctx.tools.register` 与 `GenerateOptions.tools` 都可用，于是按「不让主会话看见工具」的
+> 方案补齐：工具 schema 只随提取请求下发，宿主进程内执行——最接近上游的一版。
+
+### W6. 五轮受限工具循环 — L ✅（v0.4.0）
+
+`lib/memory-agent.js` + `lib/host.js` 双模式：六个进程内工具（`memory_read` / `memory_list` /
+`memory_grep` / `memory_write` / `memory_edit` / `memory_delete`）随 `llm.stream({ tools })` 下发，
+`collectStreamTurn` 收集文本与 `tool-call`，宿主执行后把 `tool-result` 作为 `{kind:'tool'}` 消息回放，
+`agentMaxTurns`（默认 5，钳 1–10）封顶。模型不调工具、直接吐 JSON 时照走一次性解析；循环失败的段落
+回落一次性 JSON 提示词。写入依旧全部经 `planExtractionWrites` / `applyExtraction`，模型只产出计划。
+**状态：✅ done**（`test/memory-agent.test.mjs` 32 项 + `test/agent-extraction.test.mjs` 7 项；
+E2E 新增 4 项：六个工具 schema 下发、tool-result 回放、工具写盘、索引指针更新）。
+
+### M6 验收
+
+`node --test` 343/343（24 套件）、`scripts/verify-host-e2e.mjs` 27/27、`check-syntax` 37/37、
+Windows + Linux × Node 20/22 四矩阵 CI；契约升到 v2.3（§3 两个配置、§5.1）。
 
 ## 里程碑完成定义（逐级追加）
 

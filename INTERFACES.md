@@ -4,12 +4,14 @@ This file is the **frozen interface** between the Host half (`lib/host.js`), the
 (`lib/memory-core.js`), and the Client half (`lib/client.js`). Change it only together with all
 three files. Anything not written here is an implementation detail.
 
-**Contract version: v2.2 (workspace-only memory + ZCode alignment, 2026-10-30).** Every memory
+**Contract version: v2.3 (workspace-only memory + ZCode alignment, 2026-10-31).** Every memory
 lives under `<workspaceRoot>/.dsh/memory/` and nothing is shared between workspaces. v2 briefly
 added a second, user-global layer at `~/.dsh/memory/`; **v2.1 withdraws it at the user's request** —
 see §2.5 and §8 Changelog. **v2.2 closes the five ZCode capability gaps** (related-memory
 visibility, retrieval branches, Dream consolidation, extraction cursor, custom-agent roots) without
-changing the existing data layout — see §2.6 and §6.12. Everything else from v2 (D2–D8 and the
+changing the existing data layout — see §2.6 and §6.12. **v2.3 adds the five-turn restricted tool
+loop as the default extraction engine** (`extractionMode` / `agentMaxTurns`, §5.1) and keeps the
+one-shot JSON request as the fallback and opt-out. Everything else from v2 (D2–D8 and the
 C-series RPC endpoints) is unchanged and listed in **§8 Changelog**.
 
 Porting source: ZCode `apps/zcode-cli/docs/design/v2/memory/README.md` (v4) and
@@ -137,6 +139,8 @@ export const Config = z.object({
   extractDailyLimit: z.number().default(0).volatile(),
   extractProvider: z.string().default('').volatile(),
   extractModel: z.string().default('').volatile(),
+  extractionMode: z.string().default('agent').volatile(),
+  agentMaxTurns: z.number().default(5).volatile(),
   debugLog: z.boolean().default(false).volatile(),
   gitCommitEnabled: z.boolean().default(true).volatile(),
 })
@@ -154,6 +158,8 @@ with `.get()`):
 | `extractDailyLimit` | Maximum extractions per workspace per local day. `0` (default): unlimited; counting still feeds the panel badge. |
 | `extractProvider` | Provider for the background extraction request. `''` (default): use the session route. |
 | `extractModel` | Model for the background extraction request. `''` (default): use the session route. |
+| `extractionMode` | Extraction engine (v2.3): `'agent'` (default) runs the five-turn restricted tool loop; anything else (notably `'json'`) keeps the one-shot JSON request. |
+| `agentMaxTurns` | Assistant-turn budget for the tool loop (v2.3, default `5`, clamped to 1–10); ignored in `'json'` mode. |
 | `debugLog` | Append Host diagnostics to `%TEMP%/workspace-memory-host.log` (best effort). |
 | `gitCommitEnabled` | Commit the workspace memory root when it is **already** a git repository, after every successful write (`export`/`import` included). Only effective when `<workspaceRoot>/.dsh/memory/.git` exists; the Host never runs `git init`, never blocks the turn (children spawn with `stdio: 'ignore'`), and a git failure is only logged. |
 
@@ -307,6 +313,37 @@ returns an empty string (the write side is excluded in section 5).
   fact scan (`isNonFactEntry`), and accepting it is an explicit `proposals-accept` call (§6.8).
 * A successful apply also runs the optional git hook on the touched root (§3): spawn
   `git add -A` then `git commit`, `stdio: 'ignore'`, never awaited by the turn.
+
+### 5.1 Extraction engine: five-turn restricted tool loop (v2.3)
+
+`extractionMode = 'agent'` (the default) replaces the single JSON request with a plugin-driven
+tool loop modeled on ZCode's Memory Agent. The loop runs inside the Host; the plugin never
+registers tools on `ctx.tools`, so the main session's tool list is untouched.
+
+* Tools (six, in-process, memory directory only): `memory_read` `{name}`,
+  `memory_list` `{}`, `memory_grep` `{pattern, limit?}` (at most `MEMORY_AGENT_GREP_LIMIT` = 50
+  hits, literal fallback when the pattern is not a valid RegExp), `memory_write`
+  `{name, title, type, description, body}`, `memory_edit` `{name, body, description?}`,
+  `memory_delete` `{name}` (moves to trash, never a hard delete).
+* Request: `ctx.llm.stream({ …, tools: buildMemoryAgentTools() })` — `ToolSchema` objects go out
+  with every turn; the reply stream is collected by `collectStreamTurn` (text deltas, tool-call
+  deltas, `block-end` tool-call blocks, `finish` of kind `stop` or `tool-calls`).
+* Message shape: each assistant turn is one message whose content is the optional text block
+  followed by the tool-call blocks; each tool round-trip is one `user` message whose content is
+  the `tool-result` blocks with `source: { kind: 'tool', callId }`.
+* Budget: at most `agentMaxTurns` assistant turns (`MEMORY_AGENT_MAX_TURNS = 5` by default,
+  clamped 1–10). A turn with no tool call ends the loop with its text. Text that parses as the
+  one-shot JSON plan is used directly (the model may answer without tools); otherwise the
+  journal's writes and deletes become the plan via `journalToPlan`.
+* Fallback: a provider error, an exhausted loop with no journal writes and no text, or an
+  unparseable non-empty reply reruns the same segment once with the one-shot prompt (no `tools`).
+  The agent path skips the D4 conflict re-ask; a JSON text plan inside agent mode still goes
+  through it.
+* Writes: the loop never touches disk. `journalToPlan` feeds the same `planExtractionWrites` →
+  `applyExtraction` path, so `MEMORY.md` repair, `evaluateIndexReplacement`, the 5-per-run cap,
+  trash semantics and the workspace lock are identical in both modes.
+* Trace: `recordActivity` entries and the `debugLog` line carry `engine: 'agent'` plus `turns`
+  and `toolCalls`; `extractionMode: 'json'` records `engine: 'json'`.
 
 ---
 
@@ -725,6 +762,16 @@ memory files parse. The one deliberate removal is the v2 global layer, withdrawn
 * Related-memory excerpts are computed per extraction run from the 24,000-character transcript tail
   against the existing manifest (max 8 entries, 400 characters each, 3,200 characters total). They
   are appended to the extraction prompt only; they never change the injected section.
+
+### v2.3.0 — five-turn restricted tool loop, 2026-10-31
+
+| Change | Item | Where |
+|---|---|---|
+| Default extraction engine is a plugin-driven five-turn tool loop (`lib/memory-agent.js`): six `memory_*` tools carried on `llm.stream({ tools })`, host executes them and replays `tool-result` blocks | W6 | §5.1 |
+| `Config.extractionMode` (`'agent'` default) and `Config.agentMaxTurns` (5, clamped 1–10); `'json'` restores the one-shot request | W6 | §3, §5.1 |
+| Fallback to the one-shot prompt when the loop errors, exhausts its budget without writes, or replies unparseably; JSON text inside agent mode is still parsed | W6 | §5.1 |
+| Writes keep going through `planExtractionWrites` / `applyExtraction` — the model proposes, the Host writes; `recordActivity` carries `engine` / `turns` / `toolCalls` | W6 | §5.1 |
+| Agent mode skips the D4 conflict re-ask (the loop can read the manifest itself); JSON-text plans still run it | W6 | §5.1 |
 
 ### v2.2.0 — ZCode capability alignment (W1–W5), 2026-10-30
 

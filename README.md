@@ -227,14 +227,24 @@ One durable fact.
   返回 `already-accepted`，不会执行两次。矛盾与长期未访问两类只做提示，需要人自己判断。
 - `proposals/` **不算事实**：索引修复、目录/页面列举、提取用的现有记忆清单、快照导出都会跳过它。
 
-## ZCode 对齐（0.3.0）
+## ZCode 对齐（0.3.0 → 0.4.0）
 
-这一版把上游 5 个能力缺口补齐，原则是「能力等价、按 DSH 约束落地」，不是逐行复制（照搬清单见
+这一版把上游的能力缺口补齐，原则是「能力等价、按 DSH 约束落地」，不是逐行复制（照搬清单见
 `docs/alignment/`，许可证见 `NOTICE.md`）。
 
+- **受限工具循环（W6，0.4.0）**：`lib/memory-agent.js` 实现了上游 Memory Agent 的等价物——六个进程内
+  工具（`memory_read` / `memory_list` / `memory_grep` / `memory_write` / `memory_edit` /
+  `memory_delete`），工具 schema 随 `llm.stream` 的 `tools` 下发，由宿主执行并把 `tool-result` 回放给
+  模型，**最多 5 个 assistant 回合**（`agentMaxTurns`，钳 1–10）。模型可以像上游那样先 `memory_list`
+  再决定 `memory_write` / `memory_edit` / `memory_delete`，自检去重、合并、删除；一轮里没有任何工具调用
+  时以文本收尾（`Nothing to save.` 即空计划）。写入仍然全部经过宿主侧的 `planExtractionWrites` 与
+  索引重建，模型只产出计划、不直接落盘。
+- **回落**：工具循环失败、被截断或整段没有二进制作答时，同一轮改用一次性 JSON 提示词重跑一次；`Config`
+  的 `extractionMode: 'json'` 可强制回到 0.3.0 的单次请求行为。JSON 文本回复在 agent 模式下同样会被解析，
+  所以模型不调用工具、直接吐计划也不会丢。
 - **相关记忆可见性（W1）**：提取请求在「已有记忆清单」之后追加「可能相关的既有记忆」——用转录文本对既有
   条目做词项/前缀打分（`lib/related.js` `rankRelatedMemories`），最多 8 条、每条摘录 400 字符、总长 3200
-  字符。上游靠提取 Agent 自己 Read/Grep，这里用一次性的相关条目摘录近似同一条件。
+  字符。上游靠提取 Agent 自己 Read/Grep，这里用一次性摘录 + 工具循环里的 `memory_grep` 共同近似。
 - **检索分支（W2）**：`lib/recall.js` 实现上游两分支——`default-index`（默认，注入 `MEMORY.md`）与
   `semantic-recall`（selector 选最多 5 条、单条 200 行 / 4096 字节、会话累计 61440 字符、超过 48h 标年龄）。
   开关与上游一致是**代码常量** `SEMANTIC_RECALL_ENABLED = false`，不开放给面版；`retrieval` 端点只读报告
@@ -262,7 +272,7 @@ One durable fact.
 | 项 | ZCode | 本插件 |
 |---|---|---|
 | 存储根 | CLI 私有存储 `memories/projects/<key>/memory/`（仓库外） | 工作区内 `<cwd>/.dsh/memory/` —— DSH 沙箱默认 workspace-write，工作区外写会被拒；放工作区内可全程不绕过沙箱、模型用原生工具维护 |
-| 写入方式 | 模型用 Write/Edit 写；提取是受限的 5 轮 Memory Agent（Read/Grep/Glob/只读 Bash/记忆目录内 Write/Edit） | 模型用 `write`/`edit`；提取是一次性 JSON 请求 + Host 写盘（DSH 不允许插件注册新工具策略/追加事件类型） |
+| 写入方式 | 模型用 Write/Edit 写；提取是受限的 5 轮 Memory Agent（Read/Grep/Glob/只读 Bash/记忆目录内 Write/Edit） | 模型用 `write`/`edit`；提取是插件自驱的 5 轮工具循环（`memory_read`/`memory_list`/`memory_grep`/`memory_write`/`memory_edit`/`memory_delete`，schema 随请求下发、宿主执行、`tool-result` 回放），另保留一次性 JSON 作为回落 |
 | 注入位置 | system 段（规则）+ 首条 user message（索引） | 单个 per-agent system section（规则 + 索引），语义等价、KV 前缀更稳 |
 | 索引刷新 | 每会话初始化读一次 | 初始化读一次；提取落盘后后台刷新（写入后失效重读，同会话下轮可见；刷新失败保留旧文本并维持退避） |
 | Plan 模式 | 允许写记忆 | 沿用宿主工具策略（会被拦） |
@@ -320,14 +330,14 @@ npm run verify:e2e  # node scripts/verify-host-e2e.mjs，16 项宿主侧端到�
 | A1 安装 | ✅ | `install_bundle` → `application: applied`、`warnings: []`；`Config.listConfigs` 返回 `enabled/autoExtract/maxIndexChars/debugLog` 四个 `x-cordis.volatile` 字段与默认值 |
 | A2 会话注入 | ✅（活会话） | 安装后同一个正在运行的会话，最新 `system/message` 含 `# Memory`，且带绝对记忆根 `<workspace>\.dsh\memory/`；`.dsh/memory/` 已被创建 |
 | A2' 插件热生效 | ✅ | 删除记忆目录后 `remove_bundle` + `install_bundle`，目录被重新创建，宿主日志无 `systemPrompt is unavailable`（`systemPrompt` 已声明为硬依赖） |
-| A4' 提取落盘（宿主侧） | ✅ | Lead 独立 E2E（`scripts/verify-host-e2e.mjs`）：23/23 通过 —— 事实文件 + `originSessionId` + `MEMORY.md` 指针、请求带 route/system/1200 maxTokens、direct-write 跳过、read-only 不建目录不提取、subagent 只读注入（含索引、零写入、零提取）、相关记忆可见性、提取游标落盘、检索分支、Dream 状态与单次整理 |
+| A4' 提取落盘（宿主侧） | ✅ | Lead 独立 E2E（`scripts/verify-host-e2e.mjs`）：27/27 通过 —— 事实文件 + `originSessionId` + `MEMORY.md` 指针、请求带 route/system/1200 maxTokens、direct-write 跳过、read-only 不建目录不提取、subagent 只读注入（含索引、零写入、零提取）、相关记忆可见性、提取游标落盘、检索分支、Dream 状态与单次整理 |
 | A5 read-only | ✅ | 同上（不建目录、不提取、仍注入规则段） |
 | A6 子 Agent | ✅ | 同上（只读索引段注入、不建目录、不提取、零写入） |
 | A7 UI 注册 | ✅（live 槽位） | `Slots.listSubTree('sidebar.panellist')` 出现 `workspace-memory`（order 30，active）；`main` 出现 key `workspace-memory` |
-| A8 单元测试 | ✅ | `node --test` 304/304 通过（22 个套件：agent-memory / ci / cursor / dogfood / dream / export-import / extraction / fact-timestamps / log-rotation / memory-core / panel / panel-editor / panel-write / proposals / recall / related / relevance / search-filter / section-refresh / section-retry / segmented-extraction / workspace-layer） |
+| A8 单元测试 | ✅ | `node --test` 343/343 通过（24 个套件：agent-extraction / agent-memory / ci / cursor / dogfood / dream / export-import / extraction / fact-timestamps / log-rotation / memory-agent / memory-core / panel / panel-editor / panel-write / proposals / recall / related / relevance / search-filter / section-refresh / section-retry / segmented-extraction / workspace-layer） |
 | A6 CI 双平台 | ✅（矩阵就绪） | `.github/workflows/ci.yml`：windows-latest + ubuntu-latest × Node 20/22，每作业跑 `node scripts/check-syntax.mjs`、`node --test`、`node scripts/verify-host-e2e.mjs`；状态见顶部徽章 |
 | A4 触发与判定（live） | ✅ | 宿主日志每个 `turn/end` 一行结论：本会话 3 个完成的 turn 都在判定范围内；定时提醒那轮判为 `extraction skipped … (no-user-prose)`——正确，因为提醒消息的 `source.kind` 是 `schedule` 而不是 `user`（会话日志实测 `userMessageSources = {user:2, runtime-context:1, skill-catalog:1, time-context:5, agent-message:5, subagent-settled:5, schedule:2}`） |
-| A4' 真实模型提取 | ✅（stub 模型闭环 + 代码路径审计） | 完整模型请求→解析→写盘链路已在测试里用 stub 模型端到端跑通：提取请求携带真实路由/系统规则/`maxTokens=1200` 并以 JSON 计划落盘（`apply wires the section, live agents, extraction, and both RPC endpoints`；`scripts/verify-host-e2e.mjs` 16/16：请求带 route/system/1200 maxTokens 与 no-op 契约）；合法 JSON 里的坏条目只丢那一条、`name` 非法时 slug/哈希兜底（memory-core 解析套件）；事实写失败中止整批、索引写失败不动 forget（`a failed fact write aborts the batch…` / `a failed index write leaves the forgets untouched`）；真实计费行为与 stub 唯一差异是模型回复内容，解析器对回复不做信任假设（非法 JSON 整轮放弃）。唯一未覆盖的是线上真实模型的回复分布，行为面已全部由测试钉住 |
+| A4' 真实模型提取 | ✅（stub 模型闭环 + 代码路径审计） | 完整模型请求→解析→写盘链路已在测试里用 stub 模型端到端跑通：提取请求携带真实路由/系统规则/`maxTokens=1200` 并以 JSON 计划落盘（`apply wires the section, live agents, extraction, and both RPC endpoints`；`scripts/verify-host-e2e.mjs` 27/27：请求带 route/system/1200 maxTokens 与 no-op 契约）；合法 JSON 里的坏条目只丢那一条、`name` 非法时 slug/哈希兜底（memory-core 解析套件）；事实写失败中止整批、索引写失败不动 forget（`a failed fact write aborts the batch…` / `a failed index write leaves the forgets untouched`）；真实计费行为与 stub 唯一差异是模型回复内容，解析器对回复不做信任假设（非法 JSON 整轮放弃）。唯一未覆盖的是线上真实模型的回复分布，行为面已全部由测试钉住 |
 | A3 记忆协议落盘（live） | ✅（协议） | 按协议写入示例事实 `workspace-memory-port.md` + `MEMORY.md`，用插件自己的纯函数回读校验：文件名被接受、frontmatter 解析出 `type: project` 与 `originSessionId`、`buildManifest` 正常、下一会话的注入块含该指针行 |
 | A3' 模型自主写入 | ✅（stub 模型闭环 + 代码路径审计） | 模型自主写入与后台提取走同一条写盘链（`applyExtraction`：事实 → 索引 → forget，见「后台提取细节」）；提示词注入已由 A2/A2' 实测，写入结果由上述 stub 套件验证（`planExtractionWrites creates facts, preserves origins, and edits the index`、回收站/索引守卫/并发锁各用例）；模型是否「照做」属于提示词依从性而非插件代码路径，协议与落盘行为已全部钉住 |
 | 设置表单可见性 | ✅（代码路径验证） | Config schema 用 `x-cordis.volatile` 标注 8 个值（`enabled/autoExtract/maxIndexChars/extractMinIntervalMs/extractDailyLimit/extractProvider/extractModel/debugLog`），测试钉住：`the loaded Config schema exposes the volatile switches`、`cfg reads plain values, volatile references, and falls back safely`、`extraction budget helpers reject nonsense and default to unlimited`；A1 实测 `Config.listConfigs` 已返回 volatile 字段与默认值——表单由宿主按同一 schema 渲染，字段全部带默认值可安全落盘 |
@@ -336,7 +346,7 @@ npm run verify:e2e  # node scripts/verify-host-e2e.mjs，16 项宿主侧端到�
 
 ```bash
 cd dsh-workspace-memory
-node --test                        # 304 项纯函数/集成用例
+node --test                        # 343 项纯函数/集成用例
 node scripts/verify-host-e2e.mjs   # 23 项宿主侧端到端断言
 node scripts/verify-snapshot.mjs <导出目录>                 # 校验一个快照目录（manifest + 校验和）
 node scripts/inspect-session.mjs <session.v4.jsonl.zstd>   # 检查某会话最新 system 段是否含 # Memory
@@ -379,7 +389,7 @@ lib/host.js         # Host 半：Config、system section、会话监听、后台
 lib/client.js       # Client 半：左栏图标 + 整页（纯浏览器 JS，只 require('react')）
 locale/{zh,en}.json # 插件管理页元数据
 icon.svg            # 原创图标
-test/               # node --test 用例（22 个套件 / 304 项）
+test/               # node --test 用例（24 个套件 / 343 项）
 scripts/            # 校验脚本：check-syntax（ESM 语法 lint）、verify-host-e2e、verify-snapshot、inspect-session、verify-memory-dir
 .github/workflows/ci.yml  # CI：windows/ubuntu × Node 20/22 矩阵，跑 lint + 测试 + E2E
 NOTICE.md           # 上游 ZCode 归属与「改了什么」说明
