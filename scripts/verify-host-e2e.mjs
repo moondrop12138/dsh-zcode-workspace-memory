@@ -11,7 +11,8 @@
  *      with `originSessionId` stamped from the session.
  *   3. A turn that already wrote into the memory root skips extraction entirely.
  *   4. A read-only session creates no directory and runs no extraction.
- *   5. A subagent-origin session is never initialized.
+ *   5. A subagent-origin session gets a read-only index section: it never
+ *      writes (no repair, no backup, no new facts) and never extracts.
  *
  * Usage: node scripts/verify-host-e2e.mjs
  */
@@ -279,27 +280,51 @@ const record = (name, ok, detail) => {
   await rm(scratch, { recursive: true, force: true })
 }
 
-/* --------------------------------------------------------- case 4: subagent excluded */
+/* ------------------------------------------ case 4: subagent read-only injection */
 
 {
   const harness = createHarness({ origin: 'subagent' })
   const scratch = await mkdtemp(join(tmpdir(), 'wm-e2e-sub-'))
   harness.agent.session.header.cwd = scratch
   harness.ctx.get('sandboxPolicy').resolve = () => ({ mode: 'workspace-write', workspaceRoot: scratch })
+  // Seed a pre-existing memory dir: the fact file has no pointer in MEMORY.md,
+  // so the read-only init would normally trigger an index repair write.
+  const memoryRoot = join(scratch, MEMORY_ROOT_SUFFIX)
+  await mkdir(memoryRoot, { recursive: true })
+  const factPath = join(memoryRoot, 'e2e-tabs.md')
+  const factBody = '---\nname: e2e-tabs\ndescription: The e2e project indents with tabs\nmetadata:\n  node_type: memory\n  type: project\n  originSessionId: session-other\n---\nThe e2e project indents with tabs.\n'
+  await writeFile(factPath, factBody, 'utf8')
+  await writeFile(join(memoryRoot, 'MEMORY.md'), '## Workspace Memory\n\n', 'utf8')
+  const indexBefore = await readFile(join(memoryRoot, 'MEMORY.md'), 'utf8')
+
   apply(harness.ctx, { enabled: true, autoExtract: true })
   await delay(400)
   const sectionText = harness.sections[0].text({ agent: harness.agent })
-  const dirExists = await isDirectory(join(scratch, MEMORY_ROOT_SUFFIX))
-  record('subagent session gets no memory section and no directory',
-    sectionText === '' && dirExists === false, JSON.stringify(sectionText))
+  record('subagent session injects a section containing the index',
+    sectionText.startsWith('# Memory') && sectionText.includes('MEMORY.md') && sectionText.includes('## Workspace Memory'),
+    `${sectionText.length} chars`)
+  const indexAfter = await readFile(join(memoryRoot, 'MEMORY.md'), 'utf8')
+  const files = await readdir(memoryRoot)
+  record('subagent session writes nothing (no index repair, no backup)',
+    indexAfter === indexBefore && !files.includes('MEMORY.md.prev') && files.filter((name) => name.endsWith('.md')).length === 2,
+    JSON.stringify(files))
   emit(harness, 'session/event', harness.agent.session, { type: 'turn/start', data: { turn: 1 } })
   emit(harness, 'session/event', harness.agent.session, {
     type: 'user/message',
     data: { content: [{ type: 'text', text: 'remember something for the child' }], source: { kind: 'user' } },
   })
+  emit(harness, 'tools/result', {
+    name: 'write',
+    agent: harness.agent,
+    arguments: { file_path: join(memoryRoot, 'e2e-tabs.md'), content: 'hijack' },
+  })
   emit(harness, 'session/event', harness.agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
   await delay(600)
-  record('subagent session triggers no extraction', harness.llmCalls.length === 0, String(harness.llmCalls.length))
+  record('subagent session triggers no extraction (turn and tools/result)', harness.llmCalls.length === 0, String(harness.llmCalls.length))
+  const indexFinal = await readFile(join(memoryRoot, 'MEMORY.md'), 'utf8')
+  const factFinal = await readFile(factPath, 'utf8')
+  record('subagent memory files stay byte-identical after the turn',
+    indexFinal === indexBefore && factFinal === factBody)
   await rm(scratch, { recursive: true, force: true })
 }
 

@@ -7,14 +7,21 @@ import {
   INDEX_TRUNCATION_WARNING,
   MAX_INDEX_LINES,
   MEMORY_TYPES,
+  TRASH_DIR,
+  TRASH_KEEP,
   buildExtractionPrompt,
+  buildConflictGuidance,
   buildManifest,
   buildTranscript,
+  buildTranscriptSegments,
+  conflictExcerpt,
   countWords,
   deriveTitle,
   evaluateExtraction,
   extractJsonObject,
+  factBodyText,
   factFileName,
+  findNearDuplicateMatches,
   formatIndexContent,
   indexPath,
   isIndexFile,
@@ -31,7 +38,9 @@ import {
   renderMemorySection,
   renderPointer,
   safeMemoryPath,
+  selectTrashEvictions,
   slugifyTitle,
+  trashDirPath,
   upsertPointer,
 } from '../lib/memory-core.js'
 
@@ -42,6 +51,29 @@ test('memoryRoot appends .dsh/memory and indexPath names the index', () => {
   assert.equal(indexPath(ROOT), `${ROOT}\\${INDEX_FILE}`)
   assert.equal(isIndexFile('MEMORY.md'), true)
   assert.equal(isIndexFile('memory.md'), false)
+})
+
+test('trashDirPath is a trash subdirectory and evictions keep the newest 50', () => {
+  assert.equal(trashDirPath(ROOT), `${ROOT}\\${TRASH_DIR}`)
+  assert.equal(TRASH_DIR, 'trash')
+  assert.equal(TRASH_KEEP, 50)
+
+  const entries = Array.from({ length: 52 }, (_, index) => ({ name: `fact-${index}.md`, mtimeMs: index }))
+  assert.deepEqual(selectTrashEvictions(entries), ['fact-0.md', 'fact-1.md'])
+
+  // Equal mtimes fall back to name order so the outcome is deterministic.
+  const tied = [
+    { name: 'b.md', mtimeMs: 10 },
+    { name: 'a.md', mtimeMs: 10 },
+    { name: 'c.md', mtimeMs: 20 },
+  ]
+  assert.deepEqual(selectTrashEvictions(tied, 2), ['a.md'])
+
+  assert.deepEqual(selectTrashEvictions(entries.slice(0, 50)), [])
+  assert.deepEqual(selectTrashEvictions([]), [])
+  assert.deepEqual(selectTrashEvictions(undefined), [])
+  // Unreadable mtimes are skipped rather than evicting unknown files.
+  assert.deepEqual(selectTrashEvictions([{ name: 'a.md', mtimeMs: Number.NaN }], 0), [])
 })
 
 test('fact names are lowercase kebab and never collide with the index', () => {
@@ -186,13 +218,50 @@ test('fact files render and parse back with origin preservation', () => {
   assert.ok(content.endsWith('Always indent with tabs in this repository.\n'))
 
   const front = parseFactFrontmatter(content)
-  assert.deepEqual(front, {
-    name: 'prefers-tabs',
-    description: 'User prefers tabs over spaces',
-    type: 'user',
-    originSessionId: 'session-abc',
-  })
+  // D2: the host maintains createdAt/updatedAt, so a render now carries them.
+  assert.deepEqual(
+    { ...front, createdAt: 'ts', updatedAt: 'ts' },
+    {
+      name: 'prefers-tabs',
+      description: 'User prefers tabs over spaces',
+      type: 'user',
+      originSessionId: 'session-abc',
+      createdAt: 'ts',
+      updatedAt: 'ts',
+    },
+  )
+  assert.match(front.createdAt, /^\d{4}-\d{2}-\d{2}T/)
+  assert.match(front.updatedAt, /^\d{4}-\d{2}-\d{2}T/)
   assert.equal(parseFactFrontmatter('no frontmatter'), undefined)
+})
+
+test('values containing # are quoted so YAML cannot truncate them as a comment', () => {
+  const content = renderFactFile({
+    name: 'hash-tag',
+    description: 'keep this # tag intact',
+    type: 'project',
+    body: 'Body text.',
+  })
+  assert.ok(content.includes('description: "keep this # tag intact"'))
+  assert.equal(parseFactFrontmatter(content).description, 'keep this # tag intact')
+
+  // A lone `#` must not reopen the comment inside the quoted value either.
+  const tricky = renderFactFile({
+    name: 'hash-only',
+    description: 'before # after',
+    type: 'feedback',
+    body: 'Body text.',
+  })
+  assert.ok(tricky.includes('description: "before # after"'))
+  assert.equal(parseFactFrontmatter(tricky).description, 'before # after')
+
+  // Plain values stay unquoted.
+  assert.ok(renderFactFile({
+    name: 'plain',
+    description: 'no hash here',
+    type: 'user',
+    body: 'Body text.',
+  }).includes('description: no hash here'))
 })
 
 test('feedback facts gain Why/How to apply only when missing', () => {
@@ -238,8 +307,8 @@ test('buildManifest skips the index and unparseable files', () => {
     { fileName: 'broken.md', content: 'no frontmatter' },
   ]
   assert.deepEqual(buildManifest(files), [
-    { name: 'prefers-tabs', description: 'tabs' },
-    { name: 'broken', description: '' },
+    { name: 'prefers-tabs', description: 'tabs', excerpt: 'b' },
+    { name: 'broken', description: '', excerpt: 'no frontmatter' },
   ])
   assert.equal(buildManifest(files, 1).length, 1)
 })
@@ -289,6 +358,42 @@ test('buildTranscript keeps the newest content under the cap', () => {
   assert.equal(long.truncated, true)
   assert.ok(long.text.length <= 500)
   assert.ok(long.text.includes('line 39'))
+})
+
+test('buildTranscriptSegments splits an oversized turn and keeps the newest content', () => {
+  // A turn that fits stays exactly one segment, identical to buildTranscript.
+  const short = buildTranscriptSegments([
+    { role: 'user', text: 'hello there' },
+    { role: 'assistant', text: 'hi' },
+  ])
+  assert.deepEqual(short, ['User: hello there\n\nAssistant: hi'])
+  assert.deepEqual(buildTranscriptSegments([]), [])
+
+  // 20 × ~115 chars ≈ 2.3k with a 1k cap: three segments fit the whole turn,
+  // one message per position, nothing lost.
+  const messages = Array.from({ length: 20 }, (_v, i) => ({ role: 'user', text: `line ${i} ${'x'.repeat(100)}` }))
+  const segments = buildTranscriptSegments(messages, 1000, 3)
+  assert.equal(segments.length, 3)
+  assert.ok(segments[0].includes('line 0'))
+  assert.ok(segments.at(-1).includes('line 19'))
+  for (const segment of segments) assert.ok(segment.length <= 1000)
+  const joined = segments.join('\n\n')
+  for (let i = 0; i < 20; i += 1) assert.equal(joined.split(`line ${i} `).length - 1, 1)
+
+  // 40 messages exceed three windows: the oldest go, the newest survive.
+  const overflow = buildTranscriptSegments(
+    Array.from({ length: 40 }, (_v, i) => ({ role: 'user', text: `line ${i} ${'x'.repeat(100)}` })),
+    1000,
+    3,
+  )
+  assert.equal(overflow.length, 3)
+  assert.ok(!overflow[0].includes('line 0 '))
+  assert.ok(overflow.at(-1).includes('line 39'))
+
+  // One message longer than the cap cannot be split: it keeps its newest tail.
+  const single = buildTranscriptSegments([{ role: 'user', text: 'z'.repeat(5000) }], 1000, 3)
+  assert.equal(single.length, 1)
+  assert.ok(single[0].length <= 1000)
 })
 
 test('buildExtractionPrompt carries the count, manifest and no-op contract', () => {
@@ -347,13 +452,13 @@ test('parseExtractionResponse validates strictly and caps the batch', () => {
   assert.equal(parseExtractionResponse(JSON.stringify({ memories: six })).memories.length, 5)
 
   const badType = [{ name: 'a-b', type: 'nope', description: 'd', body: 'b' }]
-  assert.equal(parseExtractionResponse(JSON.stringify({ memories: badType })), undefined,
-    'one invalid memory abandons the whole reply')
+  assert.deepEqual(parseExtractionResponse(JSON.stringify({ memories: badType })).memories, [],
+    'an entry with an invalid type is dropped, not the whole reply')
 
   const noBody = parseExtractionResponse(JSON.stringify({
     memories: [{ name: 'a-b', type: 'user', description: 'd', body: '   ' }],
   }))
-  assert.equal(noBody, undefined)
+  assert.equal(noBody.memories.length, 0, 'an entry without body is dropped individually')
 
   const coerced = parseExtractionResponse(JSON.stringify({
     memories: [{ name: 'Bad Name', title: 'Good Title', type: 'user', description: 'd', body: 'b' }],
@@ -369,6 +474,43 @@ test('parseExtractionResponse validates strictly and caps the batch', () => {
   assert.equal(parseExtractionResponse('not json'), undefined)
   assert.equal(parseExtractionResponse('[]'), undefined)
   assert.equal(parseExtractionResponse('{"memories":"nope"}'), undefined)
+})
+
+test('a pure CJK title without a name falls back to fact-<hash8> and valid neighbors survive', () => {
+  const cjk = { title: '用户偏好标签页', type: 'user', description: '更喜欢标签页', body: '用户偏好使用标签页而不是空格。' }
+  const mixed = parseExtractionResponse(JSON.stringify({
+    memories: [
+      cjk,
+      { name: 'Bad Name', type: 'nope', description: 'd', body: 'b' },
+      { title: 'Runs On Bun', type: 'project', description: 'd', body: 'b' },
+    ],
+    forget: [],
+  }))
+  assert.ok(mixed, 'one bad entry no longer abandons the whole reply')
+  assert.equal(mixed.memories.length, 2, 'the sluggable neighbor survives the bad one')
+
+  const fallback = mixed.memories[0]
+  assert.match(fallback.name, /^fact-[0-9a-f]{8}$/, 'the CJK entry gets the content-hash fallback name')
+  assert.equal(fallback.title, '用户偏好标签页', 'the original title is preserved on the pointer')
+  assert.equal(isValidMemoryName(fallback.name), true, 'the fallback name is a valid fact name')
+  assert.equal(mixed.memories[1].name, 'runs-on-bun')
+
+  // Determinism: the same content always maps to the same name; different
+  // content under the same title maps to a different one.
+  assert.equal(
+    parseExtractionResponse(JSON.stringify({ memories: [cjk] })).memories[0].name,
+    fallback.name,
+  )
+  const other = parseExtractionResponse(JSON.stringify({
+    memories: [{ ...cjk, body: '不同的正文内容。' }],
+  }))
+  assert.notEqual(other.memories[0].name, fallback.name)
+
+  // A valid raw.name always wins over the fallback.
+  const named = parseExtractionResponse(JSON.stringify({
+    memories: [{ name: 'prefers-tabs', title: '用户偏好标签页', type: 'user', description: 'd', body: 'b' }],
+  }))
+  assert.equal(named.memories[0].name, 'prefers-tabs')
 })
 
 test('pickRoute follows configured → latest → agent → default precedence', () => {
@@ -412,10 +554,123 @@ test('evaluateIndexReplacement refuses an index that silently loses pointers', (
 
 test('evaluateIndexReplacement allows growth and explicit forgets', () => {
   const before = '- [A](a.md) - one' + String.fromCharCode(10) + '- [B](b.md) - two' + String.fromCharCode(10)
-  assert.equal(evaluateIndexReplacement(before, before + '- [C](c.md) - three' + String.fromCharCode(10), []).ok, true)
+  assert.equal(evaluateIndexReplacement(before, before + '- [C](c.md) - three' + String.fromCharCode(10), [], ['c.md']).ok, true)
   assert.equal(evaluateIndexReplacement(before, '- [A](a.md) - one' + String.fromCharCode(10), ['b.md']).ok, true)
 })
 
 test('evaluateIndexReplacement allows the very first index of a workspace', () => {
   assert.equal(evaluateIndexReplacement('', '- [A](a.md) - one' + String.fromCharCode(10), []).ok, true)
+})
+
+test('evaluateIndexReplacement refuses a same-count index with unrelated content', () => {
+  const before = '- [A](a.md) - one' + String.fromCharCode(10) + '- [B](b.md) - two' + String.fromCharCode(10)
+  const after = '- [A](a.md) - one' + String.fromCharCode(10) + '- [C](c.md) - three' + String.fromCharCode(10)
+  const verdict = evaluateIndexReplacement(before, after, [])
+  assert.equal(verdict.ok, false)
+  assert.equal(verdict.beforeCount, 2)
+  assert.equal(verdict.afterCount, 2)
+  assert.match(verdict.reason, /refusing to write/)
+})
+
+test('evaluateIndexReplacement refuses growth that no write in the plan covers', () => {
+  const before = '- [A](a.md) - one' + String.fromCharCode(10)
+  const verdict = evaluateIndexReplacement(before, before + '- [C](c.md) - three' + String.fromCharCode(10), [])
+  assert.equal(verdict.ok, false)
+  assert.match(verdict.reason, /introduces a pointer for c\.md/)
+})
+
+test('evaluateIndexReplacement allows an upsert of title or hook for written files', () => {
+  const before = '- [A](a.md) - one' + String.fromCharCode(10) + '- [B](b.md) - two' + String.fromCharCode(10)
+  const after = '- [A](a.md) - renamed one' + String.fromCharCode(10) + '- [B](b.md) - fresh hook' + String.fromCharCode(10)
+  assert.equal(evaluateIndexReplacement(before, after, [], ['a.md', 'b.md']).ok, true)
+})
+
+test('evaluateIndexReplacement refuses rewrites of pointers it does not write', () => {
+  const before = '- [A](a.md) - one' + String.fromCharCode(10)
+  const after = '- [A](a.md) - renamed one' + String.fromCharCode(10)
+  const verdict = evaluateIndexReplacement(before, after, [], [])
+  assert.equal(verdict.ok, false)
+  assert.match(verdict.reason, /rewrites the pointer for a\.md/)
+})
+
+/* ------------------------------------------------------ D4 conflict guidance */
+
+test('factBodyText strips frontmatter and keeps plain bodies', () => {
+  const fact = renderFactFile({ name: 'seed', description: 'd', type: 'user', body: 'Keep tabs on.\n\nSecond para.' })
+  assert.equal(factBodyText(fact), 'Keep tabs on.\n\nSecond para.')
+  assert.equal(factBodyText('no frontmatter here'), 'no frontmatter here')
+  assert.equal(factBodyText(''), '')
+  assert.equal(factBodyText(undefined), '')
+  // CRLF and BOM variants normalize into the same body.
+  assert.equal(factBodyText('\uFEFF---\r\nname: x\r\n---\r\n\r\nbody line\r\n'), 'body line')
+})
+
+test('findNearDuplicateMatches matches prefixes and edit distance ≤ 2', () => {
+  const manifest = [{ name: 'prefers-tabs' }, { name: 'run-tests-first' }, { name: 'ab' }]
+  const matches = findNearDuplicateMatches(
+    ['prefer-tabs', 'run-tests-fist', 'unrelated-name', 'prefers-tabs'],
+    manifest,
+  )
+  // shared prefix either direction (≥ 3 chars each) or edit distance ≤ 2;
+  // the exact name itself is an upsert, not a conflict.
+  assert.deepEqual([...matches.keys()], ['prefers-tabs', 'run-tests-first'])
+  assert.deepEqual(matches.get('prefers-tabs'), ['prefer-tabs'])
+  assert.deepEqual(matches.get('run-tests-first'), ['run-tests-fist'])
+
+  // 'x' → 'ab' is exactly distance 2 (substitute + insert), so it matches.
+  assert.deepEqual([...findNearDuplicateMatches(['x'], manifest).keys()], ['ab'])
+  assert.equal(findNearDuplicateMatches([], manifest).size, 0)
+  assert.equal(findNearDuplicateMatches(['anything'], []).size, 0)
+  // 'ab' vs 'abc': prefix needs both sides ≥ 3, but edit distance 1 still hits.
+  assert.deepEqual([...findNearDuplicateMatches(['abc'], manifest).keys()], ['ab'])
+  // distance ≥ 3 misses.
+  assert.equal(findNearDuplicateMatches(['zzzzzz'], manifest).size, 0)
+  assert.equal(findNearDuplicateMatches(['abcdefgh'], manifest).size, 0)
+})
+
+test('conflictExcerpt truncates on a word boundary inside the cap', () => {
+  assert.equal(conflictExcerpt('short body'), 'short body')
+  assert.equal(conflictExcerpt(''), '')
+  assert.equal(conflictExcerpt(undefined), '')
+  const long = Array.from({ length: 80 }, (_v, i) => `word${i}`).join(' ')
+  const excerpt = conflictExcerpt(long, 50)
+  assert.ok(excerpt.length <= 51)
+  assert.ok(excerpt.endsWith('…'))
+  assert.ok(excerpt.startsWith('word0'))
+  // collapses newlines and repeated spaces
+  assert.equal(conflictExcerpt('a\n\n  b\tc'), 'a b c')
+})
+
+test('buildConflictGuidance renders excerpts with layer and candidate names', () => {
+  const matches = new Map([['prefers-tabs', ['prefer-tabs']]])
+  const details = new Map([['prefers-tabs', { excerpt: 'Uses tabs everywhere.', layer: 'workspace' }]])
+  const guidance = buildConflictGuidance(matches, details)
+  assert.ok(guidance.includes('## Conflicting existing files'))
+  assert.ok(guidance.includes('- prefers-tabs (your reply used: prefer-tabs): Uses tabs everywhere.'))
+  assert.ok(guidance.includes('update that existing file in place'))
+
+  assert.equal(buildConflictGuidance(new Map(), details), '')
+  assert.equal(buildConflictGuidance(undefined, details), '')
+  // missing detail degrades to an empty excerpt, not a crash
+  const bare = buildConflictGuidance(new Map([['orphan', ['orphan-x']]]), new Map())
+  assert.ok(bare.includes('- orphan (your reply used: orphan-x): '))
+})
+
+test('buildExtractionPrompt appends conflictGuidance before the conversation', () => {
+  const base = buildExtractionPrompt({
+    messageCount: 4,
+    manifest: [{ name: 'prefers-tabs', description: 'tabs', excerpt: 'b' }],
+  })
+  assert.ok(!base.includes('## Conflicting existing files'))
+  assert.ok(base.includes('- prefers-tabs: tabs'))
+  assert.ok(base.endsWith('## Conversation'))
+
+  const guided = buildExtractionPrompt({
+    messageCount: 4,
+    manifest: [{ name: 'prefers-tabs', description: 'tabs', excerpt: 'b' }],
+    conflictGuidance: '\n## Conflicting existing files\n\n- prefers-tabs (your reply used: prefer-tabs): Uses tabs.',
+  })
+  assert.ok(guided.includes('## Conflicting existing files'))
+  assert.ok(guided.indexOf('## Conflicting existing files') < guided.indexOf('## Conversation'))
+  assert.ok(guided.endsWith('## Conversation'))
 })
