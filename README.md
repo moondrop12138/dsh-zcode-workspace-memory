@@ -227,6 +227,36 @@ One durable fact.
   返回 `already-accepted`，不会执行两次。矛盾与长期未访问两类只做提示，需要人自己判断。
 - `proposals/` **不算事实**：索引修复、目录/页面列举、提取用的现有记忆清单、快照导出都会跳过它。
 
+## ZCode 对齐（0.3.0）
+
+这一版把上游 5 个能力缺口补齐，原则是「能力等价、按 DSH 约束落地」，不是逐行复制（照搬清单见
+`docs/alignment/`，许可证见 `NOTICE.md`）。
+
+- **相关记忆可见性（W1）**：提取请求在「已有记忆清单」之后追加「可能相关的既有记忆」——用转录文本对既有
+  条目做词项/前缀打分（`lib/related.js` `rankRelatedMemories`），最多 8 条、每条摘录 400 字符、总长 3200
+  字符。上游靠提取 Agent 自己 Read/Grep，这里用一次性的相关条目摘录近似同一条件。
+- **检索分支（W2）**：`lib/recall.js` 实现上游两分支——`default-index`（默认，注入 `MEMORY.md`）与
+  `semantic-recall`（selector 选最多 5 条、单条 200 行 / 4096 字节、会话累计 61440 字符、超过 48h 标年龄）。
+  开关与上游一致是**代码常量** `SEMANTIC_RECALL_ENABLED = false`，不开放给面版；`retrieval` 端点只读报告
+  当前分支。
+- **Dream 整理（W3）**：`lib/dream.js` 移植锁（`.consolidate-lock`，1h 新鲜度 + PID）与时机判定（24h
+  最小间隔、10min 扫描节流、≥5 个新会话），提示词保留四阶段（Orient / Gather / Consolidate / Prune）。
+  `dream-run` 手动触发一次整理（`force` 跳过门槛），`dream-status` 报告状态。与上游一致：**不自动触发**，
+  没有定时调度器。
+- **提取游标（W4）**：`lib/cursor.js` 记录每个会话「已提取到哪条消息」（`.dsh/memory-state/cursor.json`）。
+  成功与空计划推进、失败保留以便下轮重试；未推进的消息在下一轮一并重放，窗口至少保留分段容量
+  （3 × 24000 字符），所以长轮次仍走分段提取。
+- **custom-agent 记忆（W5）**：`lib/agent-memory.js` 里 `standard` preset 与 main 会话用工作区记忆根；其它
+  preset（minimal / cordis / …）与 subagent 会话按键隔离到 `agent-memory/<key>/`，索引与规则文本与主记忆同构。
+
+新增的只读/手动 RPC 端点：
+
+| 端点 | 作用 |
+|---|---|
+| `dream-run` | 手动跑一次整理（`force` 跳过 24h / 5 会话门槛），返回 `started / updates / deletes / applied` |
+| `dream-status` | 整理状态：是否运行中、上次整理时间、下一步判定与原因、锁路径 |
+| `retrieval` | 当前检索分支（`default-index` / `semantic-recall`）、是否启用、召回预算字符数 |
+
 ## 与 ZCode 的差异（有意为之）
 
 | 项 | ZCode | 本插件 |
@@ -237,8 +267,9 @@ One durable fact.
 | 索引刷新 | 每会话初始化读一次 | 初始化读一次；提取落盘后后台刷新（写入后失效重读，同会话下轮可见；刷新失败保留旧文本并维持退避） |
 | Plan 模式 | 允许写记忆 | 沿用宿主工具策略（会被拦） |
 | 提取资格 | 「独立文本块 ≥ 3 个空白分隔词」 | 同样阈值，但 CJK 字符折半计词（中文发言才能合格） |
-| 语义召回 / Dream | 代码保留但当前产品链路不启用 | 不做（与上游当前行为一致） |
-| custom-agent 记忆 / 全局 kill switch 分层 / `-p` headless 门控 | 有 | 不做 |
+| 语义召回 / Dream | 代码保留但当前产品链路不启用（`PROJECT_MEMORY_SEMANTIC_RECALL_ENABLED=false`；Dream 无自动触发） | 同样保留但不启用：`SEMANTIC_RECALL_ENABLED=false`（`retrieval` 端点报告 `default-index`），Dream 只由 `dream-run` 手动触发，不挂自动调度 |
+| custom-agent 记忆 | 按 `user` / `project` / `local` 三种 scope 分根 | 已移植：非 `standard` preset 的会话按 preset 键获得独立记忆根（`agent-memory/<key>/`），`standard` 与 main 会话仍用工作区根 |
+| 全局 kill switch 分层 / `-p` headless 门控 | 有 | 不做（DSH 侧由 `enabled` 与 minimal preset 承担） |
 | 用户全局记忆层（跨项目共享） | ZCode 无此概念 | v2 曾加、**v2.1 按用户要求撤回**：记忆只按工作区 |
 
 ## 安装 / 更新 / 卸载
@@ -289,11 +320,11 @@ npm run verify:e2e  # node scripts/verify-host-e2e.mjs，16 项宿主侧端到�
 | A1 安装 | ✅ | `install_bundle` → `application: applied`、`warnings: []`；`Config.listConfigs` 返回 `enabled/autoExtract/maxIndexChars/debugLog` 四个 `x-cordis.volatile` 字段与默认值 |
 | A2 会话注入 | ✅（活会话） | 安装后同一个正在运行的会话，最新 `system/message` 含 `# Memory`，且带绝对记忆根 `<workspace>\.dsh\memory/`；`.dsh/memory/` 已被创建 |
 | A2' 插件热生效 | ✅ | 删除记忆目录后 `remove_bundle` + `install_bundle`，目录被重新创建，宿主日志无 `systemPrompt is unavailable`（`systemPrompt` 已声明为硬依赖） |
-| A4' 提取落盘（宿主侧） | ✅ | Lead 独立 E2E（`scripts/verify-host-e2e.mjs`）：16/16 通过 —— 事实文件 + `originSessionId` + `MEMORY.md` 指针、请求带 route/system/1200 maxTokens、direct-write 跳过、read-only 不建目录不提取、subagent 只读注入（含索引、零写入、零提取） |
+| A4' 提取落盘（宿主侧） | ✅ | Lead 独立 E2E（`scripts/verify-host-e2e.mjs`）：23/23 通过 —— 事实文件 + `originSessionId` + `MEMORY.md` 指针、请求带 route/system/1200 maxTokens、direct-write 跳过、read-only 不建目录不提取、subagent 只读注入（含索引、零写入、零提取）、相关记忆可见性、提取游标落盘、检索分支、Dream 状态与单次整理 |
 | A5 read-only | ✅ | 同上（不建目录、不提取、仍注入规则段） |
 | A6 子 Agent | ✅ | 同上（只读索引段注入、不建目录、不提取、零写入） |
 | A7 UI 注册 | ✅（live 槽位） | `Slots.listSubTree('sidebar.panellist')` 出现 `workspace-memory`（order 30，active）；`main` 出现 key `workspace-memory` |
-| A8 单元测试 | ✅ | `node --test` 188/188 通过（17 个套件：memory-core / extraction / segmented-extraction / section-retry / section-refresh / panel / panel-editor / panel-write / log-rotation / ci / search-filter / dogfood / dual-layer / fact-timestamps / relevance / export-import / proposals） |
+| A8 单元测试 | ✅ | `node --test` 304/304 通过（22 个套件：agent-memory / ci / cursor / dogfood / dream / export-import / extraction / fact-timestamps / log-rotation / memory-core / panel / panel-editor / panel-write / proposals / recall / related / relevance / search-filter / section-refresh / section-retry / segmented-extraction / workspace-layer） |
 | A6 CI 双平台 | ✅（矩阵就绪） | `.github/workflows/ci.yml`：windows-latest + ubuntu-latest × Node 20/22，每作业跑 `node scripts/check-syntax.mjs`、`node --test`、`node scripts/verify-host-e2e.mjs`；状态见顶部徽章 |
 | A4 触发与判定（live） | ✅ | 宿主日志每个 `turn/end` 一行结论：本会话 3 个完成的 turn 都在判定范围内；定时提醒那轮判为 `extraction skipped … (no-user-prose)`——正确，因为提醒消息的 `source.kind` 是 `schedule` 而不是 `user`（会话日志实测 `userMessageSources = {user:2, runtime-context:1, skill-catalog:1, time-context:5, agent-message:5, subagent-settled:5, schedule:2}`） |
 | A4' 真实模型提取 | ✅（stub 模型闭环 + 代码路径审计） | 完整模型请求→解析→写盘链路已在测试里用 stub 模型端到端跑通：提取请求携带真实路由/系统规则/`maxTokens=1200` 并以 JSON 计划落盘（`apply wires the section, live agents, extraction, and both RPC endpoints`；`scripts/verify-host-e2e.mjs` 16/16：请求带 route/system/1200 maxTokens 与 no-op 契约）；合法 JSON 里的坏条目只丢那一条、`name` 非法时 slug/哈希兜底（memory-core 解析套件）；事实写失败中止整批、索引写失败不动 forget（`a failed fact write aborts the batch…` / `a failed index write leaves the forgets untouched`）；真实计费行为与 stub 唯一差异是模型回复内容，解析器对回复不做信任假设（非法 JSON 整轮放弃）。唯一未覆盖的是线上真实模型的回复分布，行为面已全部由测试钉住 |
@@ -305,8 +336,8 @@ npm run verify:e2e  # node scripts/verify-host-e2e.mjs，16 项宿主侧端到�
 
 ```bash
 cd dsh-workspace-memory
-node --test                        # 188 项纯函数/集成用例
-node scripts/verify-host-e2e.mjs   # 16 项宿主侧端到端断言
+node --test                        # 304 项纯函数/集成用例
+node scripts/verify-host-e2e.mjs   # 23 项宿主侧端到端断言
 node scripts/verify-snapshot.mjs <导出目录>                 # 校验一个快照目录（manifest + 校验和）
 node scripts/inspect-session.mjs <session.v4.jsonl.zstd>   # 检查某会话最新 system 段是否含 # Memory
 node scripts/verify-memory-dir.mjs "<工作区绝对路径>"        # 用插件自己的纯函数校验记忆目录与注入块
@@ -348,7 +379,7 @@ lib/host.js         # Host 半：Config、system section、会话监听、后台
 lib/client.js       # Client 半：左栏图标 + 整页（纯浏览器 JS，只 require('react')）
 locale/{zh,en}.json # 插件管理页元数据
 icon.svg            # 原创图标
-test/               # node --test 用例（17 个套件 / 188 项）
+test/               # node --test 用例（22 个套件 / 304 项）
 scripts/            # 校验脚本：check-syntax（ESM 语法 lint）、verify-host-e2e、verify-snapshot、inspect-session、verify-memory-dir
 .github/workflows/ci.yml  # CI：windows/ubuntu × Node 20/22 矩阵，跑 lint + 测试 + E2E
 NOTICE.md           # 上游 ZCode 归属与「改了什么」说明

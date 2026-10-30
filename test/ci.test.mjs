@@ -93,9 +93,9 @@ test('README test and E2E counts match the suites on disk', async () => {
   const { readdir } = await import('node:fs/promises')
   const testDir = await readdir(join(root, 'test'))
   const suites = testDir.filter((name) => name.endsWith('.test.mjs'))
-  assert.equal(suites.length, 17, `expected 17 test suites, found: ${suites.join(', ')}`)
-  assert.ok(readme.includes('188/188'), 'README A8 row should cite the 188-test run')
-  assert.ok(readme.includes('188 项纯函数/集成用例'), 'README repro block should cite 188 tests')
+  assert.equal(suites.length, 22, `expected 22 test suites, found: ${suites.join(', ')}`)
+  assert.ok(readme.includes('304/304'), 'README A8 row should cite the 304-test run')
+  assert.ok(readme.includes('304 项纯函数/集成用例'), 'README repro block should cite 304 tests')
   // Roadmap C3 must stay documented where users look for it.
   assert.ok(readme.includes('panel-write'), 'README suite list should name panel-write')
   assert.ok(readme.includes('panel-editor'), 'README suite list should name panel-editor')
@@ -110,6 +110,6 @@ test('README test and E2E counts match the suites on disk', async () => {
 
   const e2e = await readFile(join(root, 'scripts/verify-host-e2e.mjs'), 'utf8')
   const e2eChecks = (e2e.match(/\brecord\(/g) ?? []).length
-  assert.equal(e2eChecks, 16, `verify-host-e2e.mjs should hold 16 checks, found ${e2eChecks}`)
-  assert.ok(readme.includes('16/16'), 'README should cite the 16-check E2E run')
+  assert.equal(e2eChecks, 23, `verify-host-e2e.mjs should hold 23 checks, found ${e2eChecks}`)
+  assert.ok(readme.includes('23/23'), 'README should cite the 23-check E2E run')
 })

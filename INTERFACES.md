@@ -4,11 +4,13 @@ This file is the **frozen interface** between the Host half (`lib/host.js`), the
 (`lib/memory-core.js`), and the Client half (`lib/client.js`). Change it only together with all
 three files. Anything not written here is an implementation detail.
 
-**Contract version: v2.1 (workspace-only memory, 2026-10-25).** Every memory lives under
-`<workspaceRoot>/.dsh/memory/` and nothing is shared between workspaces. v2 briefly added a
-second, user-global layer at `~/.dsh/memory/`; **v2.1 withdraws it at the user's request** — see
-§2.5 and §8 Changelog. Everything else from v2 (D2–D8 and the C-series RPC endpoints) is
-unchanged and listed in **§8 Changelog**.
+**Contract version: v2.2 (workspace-only memory + ZCode alignment, 2026-10-30).** Every memory
+lives under `<workspaceRoot>/.dsh/memory/` and nothing is shared between workspaces. v2 briefly
+added a second, user-global layer at `~/.dsh/memory/`; **v2.1 withdraws it at the user's request** —
+see §2.5 and §8 Changelog. **v2.2 closes the five ZCode capability gaps** (related-memory
+visibility, retrieval branches, Dream consolidation, extraction cursor, custom-agent roots) without
+changing the existing data layout — see §2.6 and §6.12. Everything else from v2 (D2–D8 and the
+C-series RPC endpoints) is unchanged and listed in **§8 Changelog**.
 
 Porting source: ZCode `apps/zcode-cli/docs/design/v2/memory/README.md` (v4) and
 `packages/core/src/{memory,context/sections/memory.ts}`. Deliberate deviations are listed in
@@ -47,7 +49,12 @@ workspace; no code path reads or writes a home-directory memory root (§2.5).
   <fact-name>.md         one durable fact per file, YAML frontmatter + Markdown body
   proposals/             consolidation proposals (D8); never facts, never injected
   trash/                 forgotten facts kept for one generation (ring of 50)
+  .consolidate-lock      Dream lock + last-consolidated marker (v2.2, §2.6)
   .git/                  optional, user-created: enables the git-commit mode (§3)
+<workspaceRoot>/.dsh/memory-state/
+  cursor.json            per-session extraction cursor (v2.2, §2.6); not memory content
+<workspaceRoot>/.dsh/memory/agent-memory/<agent-key>/
+  MEMORY.md + <fact-name>.md   private root for one non-standard agent preset (v2.2, §2.6)
 ```
 
 * `MEMORY.md` pointer line: `- [Title](fact-name.md) — hook` (em dash U+2014, one line, no
@@ -312,7 +319,7 @@ Request `POST /api/dsh-workspace-memory/call`, body:
 ```json
 { "rpcId": "<opaque string>", "type": "client-request",
   "method": "dsh-workspace-memory/call",
-  "payload": { "endpoint": "catalog" | "read" | "activities" | "session-state" | "export" | "import" | "proposals" | "proposals-accept" | "fact-read" | "fact-save" | "fact-delete" | "trash-list" | "trash-restore", "payload": { } } }
+  "payload": { "endpoint": "catalog" | "read" | "activities" | "session-state" | "export" | "import" | "proposals" | "proposals-accept" | "fact-read" | "fact-save" | "fact-delete" | "trash-list" | "trash-restore" | "dream-run" | "dream-status" | "retrieval", "payload": { } } }
 ```
 
 Response (HTTP 200):
@@ -627,6 +634,29 @@ interface TrashRestore {
 
 ---
 
+### 6.12 `dream-run` / `dream-status` / `retrieval` (v2.2, ZCode alignment)
+
+All three are additive and read-or-manual: nothing here changes extraction or injection.
+
+* `dream-status` — payload `{ "sessionId", "workspace"? }`. Resolves a live session record, or (when
+  only `workspace` is given) a synthetic record for a workspace in the catalog whitelist; answers
+  `failure('unknown-workspace', …)` otherwise. Returns
+  `{ autoEnabled: false, running, lastConsolidatedAt, lastRunAt, lastResult }` plus the timing gate
+  (`nextDecision`, `nextReason`) and `lockPath`.
+* `dream-run` — payload `{ "sessionId", "workspace"?, "force"? }`. Runs at most one consolidation
+  pass (one plugin-wide slot). The pass is gated by `evaluateDreamTiming` (24h minimum interval,
+  10-minute scan throttle, ≥5 sessions) unless `force: true`; it takes `.consolidate-lock`
+  (1h freshness + live PID) and refuses with `reason: 'locked' | 'busy' | 'gated' | 'not-writable' |
+  'read-only-session'`. A successful pass leaves the lock file in place as the last-consolidated
+  marker; a failed pass restores its previous mtime. Any writes go through the same guarded path as
+  extraction (§5), so `MEMORY.md.prev`, the index guard and the trash ring all apply.
+* `retrieval` — payload `{}`. Reports `{ branch, active, recallBudgetChars }`. `branch` is
+  `'default-index'` while the shipped constant `SEMANTIC_RECALL_ENABLED = false` (ZCode's
+  `PROJECT_MEMORY_SEMANTIC_RECALL_ENABLED`) leaves the semantic branch off; it is **not** a Config
+  switch, matching upstream. The semantic branch, when flipped in code, selects at most 5 facts with
+  a 256-token selector request, caps a fact at 200 lines / 4096 bytes, keeps a 61,440-character
+  session budget and annotates facts older than 48h.
+
 ## 7. Client halves and seats
 
 | Seat | Registration | Props |
@@ -680,7 +710,34 @@ Every item below is an **additive, backward-compatible** change (new optional fi
 endpoints, new volatile `Config` keys). A v1 client keeps working against a v0.2.1 Host, and old
 memory files parse. The one deliberate removal is the v2 global layer, withdrawn in v2.1.
 
-### v2.1.0 — global layer withdrawn (workspace-only), 2026-10-25
+### 2.6 ZCode-alignment state (v2.2)
+
+* `memory-state/cursor.json` — `{ version: 1, sessions: { "<sessionId>": { boundaryId, at, attempts } } }`.
+  `boundaryId` is `<sessionId>:<seq>` of the last message an extraction covered; `success` and `no-op`
+  advance it, `error`/`abort` keep it and bump `attempts`, so an uncovered turn is replayed on the
+  next extraction. The window keeps at least the segmentation capacity (3 × 24,000 characters).
+  A corrupt file degrades to an empty cursor instead of failing the plugin.
+* `agent-memory/<agent-key>/` — private memory root for a session whose `header.agentPreset` is a
+  non-empty value other than `standard` (wrapped in `failures`, plus `subagent` sessions keyed by
+  origin). `standard` presets and main sessions keep the workspace root. The
+  `agent-memory/` subtree is created lazily by the first automated write; the injected section keeps
+  the same rules/index shape with the agent root path.
+* Related-memory excerpts are computed per extraction run from the 24,000-character transcript tail
+  against the existing manifest (max 8 entries, 400 characters each, 3,200 characters total). They
+  are appended to the extraction prompt only; they never change the injected section.
+
+### v2.2.0 — ZCode capability alignment (W1–W5), 2026-10-30
+
+| Change | Item | Where |
+|---|---|---|
+| Extraction prompt gains a "possibly related existing memories" block (8 entries, 400 chars each, 3,200 total) derived from the transcript tail | W1 | §2.6, §5 |
+| Retrieval branches implemented (`default-index` / `semantic-recall`, selector + 5 items + 61,440-char budget + stale annotation); the switch is the code constant `SEMANTIC_RECALL_ENABLED = false`, as upstream | W2 | §6.12 |
+| Dream consolidation ported: timing gate (24h / 10min / ≥5 sessions), `.consolidate-lock`, four-phase prompt, guarded apply; manual `dream-run` only, no scheduler | W3 | §2.6, §6.12 |
+| Per-session extraction cursor persisted in `memory-state/cursor.json`; failure keeps the boundary so messages are replayed | W4 | §2.6 |
+| Non-standard agent presets get their own memory root under `agent-memory/<key>/` | W5 | §2.6 |
+| New endpoints `dream-run`, `dream-status`, `retrieval` | W1–W3 | §6.12 |
+
+
 
 | Change | Landed | Specified in |
 |---|---|---|

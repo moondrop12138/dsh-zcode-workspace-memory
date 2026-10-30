@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
 
-const { apply } = await import('../lib/host.js')
+const { apply, __internals } = await import('../lib/host.js')
 
 const MEMORY_ROOT_SUFFIX = join('.dsh', 'memory')
 
@@ -325,6 +325,93 @@ const record = (name, ok, detail) => {
   const factFinal = await readFile(factPath, 'utf8')
   record('subagent memory files stay byte-identical after the turn',
     indexFinal === indexBefore && factFinal === factBody)
+  await rm(scratch, { recursive: true, force: true })
+}
+
+/* ------------------------- case 5: related memories + extraction cursor (W1/W4) */
+
+{
+  const harness = createHarness({ reply: JSON.stringify({ memories: [], forget: [] }) })
+  const scratch = await mkdtemp(join(tmpdir(), 'wm-e2e-related-'))
+  harness.agent.session.header.cwd = scratch
+  harness.ctx.get('sandboxPolicy').resolve = () => ({ mode: 'workspace-write', workspaceRoot: scratch })
+  const memoryRoot = join(scratch, MEMORY_ROOT_SUFFIX)
+  await mkdir(memoryRoot, { recursive: true })
+  await writeFile(join(memoryRoot, 'e2e-tabs.md'),
+    '---\nname: e2e-tabs\ndescription: The e2e project indents with tabs\nmetadata:\n  node_type: memory\n  type: project\n---\nThe e2e project indents with tabs.\n',
+    'utf8')
+  await writeFile(join(memoryRoot, 'MEMORY.md'),
+    '## Workspace Memory\n\n- [E2E tabs](e2e-tabs.md) — The e2e project indents with tabs\n',
+    'utf8')
+
+  apply(harness.ctx, { enabled: true, autoExtract: true })
+  await delay(400)
+  emit(harness, 'session/event', harness.agent.session, { type: 'turn/start', data: { turn: 3 } })
+  emit(harness, 'session/event', harness.agent.session, {
+    type: 'user/message',
+    data: { content: [{ type: 'text', text: 'we still indent with tabs in this project' }], source: { kind: 'user' } },
+  })
+  emit(harness, 'session/event', harness.agent.session, {
+    type: 'assistant/message',
+    data: { message: { role: 'assistant', content: [{ type: 'text', text: 'Understood.' }] } },
+  })
+  emit(harness, 'session/event', harness.agent.session, { type: 'turn/end', data: { turn: 3, reason: { kind: 'completed' } } })
+
+  await waitFor(() => harness.llmCalls.length > 0, 4000)
+  const prompt = harness.llmCalls[0]?.messages?.[0]?.content?.[0]?.text ?? ''
+  record('extraction prompt shows the possibly-related existing memories',
+    prompt.includes('Possibly related existing memories') && prompt.includes('e2e-tabs'),
+    `${prompt.length} chars`)
+
+  const cursorPath = join(scratch, '.dsh', 'memory-state', 'cursor.json')
+  const settled = await waitFor(async () => {
+    try {
+      await stat(cursorPath)
+      return true
+    } catch (_error) {
+      return false
+    }
+  })
+  record('extraction cursor persists the session boundary', settled, cursorPath)
+  if (settled) {
+    const cursor = JSON.parse(await readFile(cursorPath, 'utf8'))
+    const entry = cursor.sessions?.[harness.sessionId]
+    record('cursor records the advanced boundary for this session',
+      typeof entry?.boundaryId === 'string' && entry?.attempts === 0,
+      JSON.stringify(entry))
+  }
+  await rm(scratch, { recursive: true, force: true })
+}
+
+/* ------------------------------------- case 6: consolidation + retrieval RPC (W2/W3) */
+
+{
+  const harness = createHarness({ reply: JSON.stringify({ memories: [], forget: [] }) })
+  const scratch = await mkdtemp(join(tmpdir(), 'wm-e2e-rpc-'))
+  harness.agent.session.header.cwd = scratch
+  harness.ctx.get('sandboxPolicy').resolve = () => ({ mode: 'workspace-write', workspaceRoot: scratch })
+  apply(harness.ctx, { enabled: true, autoExtract: true })
+  const plugin = __internals.pluginForContext(harness.ctx)
+  await delay(400)
+
+  const retrieval = await __internals.dispatch(plugin, 'retrieval', {})
+  record('retrieval endpoint reports the default-index branch',
+    retrieval.ok === true && retrieval.value.branch === 'default-index' && retrieval.value.active === false,
+    JSON.stringify(retrieval.value))
+
+  const status = await __internals.dispatch(plugin, 'dream-status', { sessionId: harness.sessionId })
+  record('dream-status reports auto-off consolidation state',
+    status.ok === true && status.value.autoEnabled === false && status.value.running === false,
+    JSON.stringify(status.value))
+
+  const callsBefore = harness.llmCalls.length
+  const run = await __internals.dispatch(plugin, 'dream-run', { sessionId: harness.sessionId, force: true })
+  record('dream-run starts one consolidation pass',
+    run.ok === true && run.value.started === true,
+    JSON.stringify(run.value))
+  record('dream-run sends the consolidation prompt to the model',
+    harness.llmCalls.length > callsBefore,
+    `${callsBefore} -> ${harness.llmCalls.length}`)
   await rm(scratch, { recursive: true, force: true })
 }
 

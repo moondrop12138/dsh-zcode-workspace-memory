@@ -16,6 +16,7 @@
 | M2 | 0.1.5 | 0.2.0 | 安全边界、成本控制、运营卫生 | RPC 行为收窄（修 bug 性质） |
 | M3 | 0.1.6 | 0.2.0 | 记忆体验（面板 + 可见性） | 新增 RPC 端点，向后兼容 |
 | M4 | 0.2.0 | 0.2.0 | 契约升级：智能召回（D1 全局层已撤回，契约 v2.1） | INTERFACES.md v2.1 |
+| M5 | 0.3.0 | 0.3.0 | ZCode 能力对齐：相关记忆 / 检索分支 / Dream / 游标 / agent 记忆 | INTERFACES.md v2.2 |
 
 明确不做（当前版本范围外）：向量/embedding 检索、云端同步、多设备实时协作、记忆跨用户共享。
 
@@ -187,6 +188,52 @@
 
 - 更新本仓库记忆档案：`.dsh/memory/workspace-memory-index-overwrite-bug.md` 已过时（代码已修复），按插件自己的规则执行 forget/更新——该项目记忆系统自身的第一次dogfood。
 - **状态：✅ done（v0.2.0）**。dogfood 闭环落在 `test/dogfood.test.mjs`；工作区记忆档案里的 `workspace-memory-index-overwrite-bug.md` 已按插件自身规则更正为「已修复」。
+
+## M5 — ZCode 能力对齐（v0.3.0，2026-10-30）
+
+用户要求「用 workflow 并行完成那 5 个能力缺口，这一次就完全对齐」（m00851）。做法是能力等价、
+按 DSH 约束落地：能照搬的上游模块直接移植（Apache-2.0，见 NOTICE.md），DSH 拿不到的
+（写工具、受限工具循环）用一次性 JSON 计划 + 宿主受保护写路径替代。
+
+### W1. 相关记忆可见性 — S ✅（v0.3.0）
+
+上游让提取 Agent 自己 Read/Grep 记忆目录；本插件在提取提示词里追加「可能相关的既有记忆」
+（转录文本 vs 既有条目打分，最多 8 条 × 400 字符、总 3,200 字符）。
+`lib/related.js` · `test/related.test.mjs`（16）· 集成在 `extractOnce`。
+**状态：✅ done**（E2E 断言 `extraction prompt shows the possibly-related existing memories`）。
+
+### W2. 检索分支 + selector — M ✅（v0.3.0）
+
+`lib/recall.js` 移植 `project-memory-retrieval-branch.ts` 与 `recall/{manifest,selector,content,types,index}.ts`：
+`default-index` 与 `semantic-recall` 互斥，selector 最多 5 条、单条 200 行 / 4096 字节、会话 61,440
+字符、>48h 标年龄。开关保持上游的代码常量 `SEMANTIC_RECALL_ENABLED = false`，不开放配置；
+`retrieval` 端点只读报告当前分支。**状态：✅ done**（`test/recall.test.mjs` 26 项；E2E 断言分支为 `default-index`）。
+
+### W3. Dream 等价层 — L ✅（v0.3.0）
+
+`lib/dream.js` 移植 `dream.ts` 的锁（`.consolidate-lock`，1h 新鲜度 + PID）与时机门（24h 最小间隔、
+10min 扫描节流、≥5 个新会话），四阶段提示词改 `CLAUDE.md` → `AGENTS.md`；写盘复用 `applyExtraction`，
+所以索引守卫、`MEMORY.md.prev`、trash 环全部生效。与上游一致**不自动触发**：只由 `dream-run` 手动跑，
+`dream-status` 报告状态；`collectDreamTouchedPaths` 未搬（依赖 bash 命令解析）。
+**状态：✅ done**（`test/dream.test.mjs` 24 项；E2E 跑通 `dream-status` 与一次 `dream-run`）。
+
+### W4. 提取游标 — M ✅（v0.3.0）
+
+`lib/cursor.js` + `.dsh/memory-state/cursor.json`：成功/空计划推进，失败保留并 `attempts + 1`，
+未推进的消息下轮重放；窗口下限取分段容量（3 × 24,000 字符），长轮次仍走分段提取。
+**状态：✅ done**（`test/cursor.test.mjs` 25 项；E2E 断言游标落盘与边界推进）。
+
+### W5. custom-agent 记忆 — M ✅（v0.3.0）
+
+`lib/agent-memory.js`：`standard` 与 main 会话沿用工作区根，其它 preset / subagent 会话按键隔离到
+`agent-memory/<key>/`，规则与索引同构。**状态：✅ done**（`test/agent-memory.test.mjs` 25 项）。
+
+### M5 验收
+
+`node --test` 304/304（22 套件）、`scripts/verify-host-e2e.mjs` 23/23、`check-syntax` 35/35、
+Windows + Linux × Node 20/22 四矩阵 CI；契约升到 v2.2（§2.6、§6.12）。
+明确不做的仍是硬约束：DSH 不允许插件注册写工具或受限工具循环，所以上游的
+`memory-agent-loop.ts` 不搬——这一项在「完全对齐」里是等价替代，不是缺口。
 
 ## 里程碑完成定义（逐级追加）
 
