@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, statSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -29,7 +29,13 @@ test('a journal past 1 MiB rotates to .log.1 and keeps one generation', async ()
       assert.ok(fresh.includes('rotation-test-line ' + round), 'the append lands in the fresh file')
       assert.ok(fresh.length < LOG_ROTATE_BYTES, 'the fresh file starts small')
     }
-    assert.ok(statSync(LOG_ROTATED_PATH).size <= LOG_ROTATE_BYTES + 100)
+    // One generation only: .log.1 holds the *previous* journal, never an
+    // accumulation of older rounds. Size is deliberately not asserted here —
+    // every test file in this run appends to the same journal path in tmpdir,
+    // so a byte count is no stable property.
+    const lastGeneration = readFileSync(LOG_ROTATED_PATH, 'utf8')
+    assert.ok(lastGeneration.includes('round 1'), 'the newest oversized file is the retained generation')
+    assert.ok(!lastGeneration.includes('round 0'), 'the older generation was replaced, not shifted')
   } finally {
     await resetLog()
   }

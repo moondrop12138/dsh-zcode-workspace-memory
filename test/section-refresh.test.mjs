@@ -43,10 +43,14 @@ function createFakeFs() {
     stat: statOf,
     readText: async (target) => files.get(target.displayPath),
     listDir: async (target) => {
-      const prefix = target.displayPath.endsWith('\\') ? target.displayPath : target.displayPath + '\\'
+      // Accept either separator so a POSIX fixture directory is not searched
+      // for as "...\".
+      const trimmed = target.displayPath.replace(/[\\/]+$/, '')
+      const prefixes = [trimmed + '\\', trimmed + '/']
       const entries = []
       for (const [key, value] of files) {
-        if (!key.startsWith(prefix)) continue
+        const prefix = prefixes.find((candidate) => key.startsWith(candidate) && key !== trimmed)
+        if (prefix === undefined) continue
         const rest = key.slice(prefix.length)
         if (rest.includes('\\') || rest.includes('/')) continue
         entries.push({ name: rest, type: 'file', target: { targetKey: key, displayPath: key }, size: value.length })

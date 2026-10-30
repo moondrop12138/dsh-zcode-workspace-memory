@@ -56,7 +56,11 @@ const {
   workspaceRootOf,
 } = __internals
 
-const WS = 'C:\\work\\demo'
+// The fixtures build real path key shapes through `node:path`, so they must be
+// absolute for the *host* platform: Windows keeps a drive-letter root, POSIX
+// gets a plain absolute root. Hardcoding a Windows root made every
+// `path.resolve`-based lookup miss on Linux.
+const WS = process.platform === 'win32' ? 'C:\\work\\demo' : '/work/demo'
 
 /* ------------------------------------------------------------------- config */
 
@@ -196,7 +200,9 @@ test('a write tool mentioning the memory root marks a direct memory write', () =
   applyToolResult(buffer, normalizePathKey(`${WS}\\.dsh\\memory`), { name: 'read', arguments: { path: `${WS}\\.dsh\\memory\\MEMORY.md` } })
   assert.equal(buffer.directWrite, false, 'a read is not a direct write')
   applyToolResult(buffer, normalizePathKey(`${WS}\\.dsh\\memory`), { name: 'write', arguments: { file_path: `${WS}\\.Dsh\\Memory\\prefers-tabs.md` } })
-  assert.equal(buffer.directWrite, true, 'path matching is case-insensitive on Windows')
+  // Only a case-insensitive filesystem (Windows) folds the alternate spelling
+  // back into the memory root; POSIX keeps it a different directory.
+  assert.equal(buffer.directWrite, process.platform === 'win32', 'path matching follows the platform filesystem case rules')
   const other = newTurnBuffer()
   applyToolResult(other, normalizePathKey(`${WS}\\.dsh\\memory`), { name: 'edit', arguments: { path: `${WS}\\src\\app.ts` } })
   assert.equal(other.directWrite, false)
@@ -355,10 +361,16 @@ function createFakeFs() {
     stat: statOf,
     readText: async (target) => files.get(target.displayPath),
     listDir: async (target) => {
-      const prefix = target.displayPath.endsWith('\\') ? target.displayPath : target.displayPath + '\\'
+      const base = target.displayPath
+      const trimmed = base.replace(/[\\/]+$/, '')
+      // Both separators are accepted because the fixture may hold keys written
+      // with either one; the appended one must match the host platform so a
+      // POSIX fixture directory is not searched for as "...\".
+      const prefixes = [trimmed + '\\', trimmed + '/']
       const entries = []
       for (const [key, value] of files) {
-        if (!key.startsWith(prefix)) continue
+        const prefix = prefixes.find((candidate) => key.startsWith(candidate) && key !== trimmed)
+        if (prefix === undefined) continue
         const rest = key.slice(prefix.length)
         if (rest.includes('\\') || rest.includes('/')) continue
         entries.push({ name: rest, type: 'file', target: { targetKey: key, displayPath: key }, size: value.length })
@@ -473,6 +485,23 @@ async function waitFor(predicate, timeoutMs = 3000) {
     if (Date.now() > deadline) return false
     await new Promise((done) => setTimeout(done, 10))
   }
+}
+
+/**
+ * Poll an async reader until its value satisfies `predicate` and return that
+ * value. A disk write (the index rewrite) lands a tick after the file it
+ * describes, so a single `readFile` right after the first artefact appears is a
+ * race on a loaded CI runner.
+ */
+async function waitForValue(read, predicate, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  let value = await read()
+  while (!predicate(value)) {
+    if (Date.now() > deadline) return value
+    await new Promise((done) => setTimeout(done, 10))
+    value = await read()
+  }
+  return value
 }
 
 test('apply wires the section, live agents, extraction, and both RPC endpoints', async () => {
@@ -789,7 +818,7 @@ test('repairIndex rebuilds missing pointers within its per-file read budget', as
   const { repairIndex } = __internals
   const plugin = { config: { debugLog: true } }
   const fs = createFakeFs()
-  const memoryDir = 'C:\\work\\demo\\.dsh\\memory'
+  const memoryDir = join(WS, '.dsh', 'memory')
   const fact = (name, description) => '---\nname: ' + name + '\ndescription: ' + description
     + '\nmetadata:\n  node_type: memory\n  type: user\n---\nbody\n'
   fs.files.set(join(memoryDir, 'MEMORY.md'), '')
@@ -807,7 +836,7 @@ test('repairIndex stops reading when the per-file read budget runs out', async (
   const { repairIndex } = __internals
   const plugin = { config: { debugLog: true } }
   const fs = createFakeFs()
-  const memoryDir = 'C:\\work\\demo\\.dsh\\memory'
+  const memoryDir = join(WS, '.dsh', 'memory')
   fs.files.set(join(memoryDir, 'MEMORY.md'), '')
   for (let index = 0; index < 4; index += 1) {
     fs.files.set(join(memoryDir, 'fact-' + index + '.md'),
@@ -992,9 +1021,13 @@ test('forget moves the fact into trash and keeps the manifest clean', async () =
     assert.equal(existsSync(join(memoryDir, 'stale-fact.md')), false)
     assert.equal(await readFile(join(trashDir, 'stale-fact.md'), 'utf8'), fact)
 
-    // The index pointer was removed.
-    const index = await readFile(join(memoryDir, 'MEMORY.md'), 'utf8')
+    // The index pointer was removed; the rewrite can trail the trash move.
+    const index = await waitForValue(
+      () => readFile(join(memoryDir, 'MEMORY.md'), 'utf8').catch(() => ''),
+      (text) => !text.includes('stale-fact.md'),
+    )
     assert.equal(index.includes('stale-fact.md'), false)
+    assert.equal(await waitFor(() => existsSync(join(memoryDir, 'MEMORY.md.prev'))), true)
     assert.match(await readFile(join(memoryDir, 'MEMORY.md.prev'), 'utf8'), /\[Stale\]/)
     ctxRef.disposeAll()
 

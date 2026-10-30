@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
 
 import {
   DEFAULT_MAX_INDEX_CHARS,
@@ -44,17 +45,21 @@ import {
   upsertPointer,
 } from '../lib/memory-core.js'
 
-const ROOT = 'C:\\work\\demo\\.dsh\\memory'
+// Paths here are built by `node:path`, so the fixture root must be absolute for
+// the host platform rather than a hardcoded Windows drive.
+const WORKSPACE = process.platform === 'win32' ? 'C:\\work\\demo' : '/work/demo'
+const ROOT = join(WORKSPACE, '.dsh', 'memory')
+const OUTSIDE = process.platform === 'win32' ? 'C:\\windows\\evil.md' : '/etc/evil.md'
 
 test('memoryRoot appends .dsh/memory and indexPath names the index', () => {
-  assert.equal(memoryRoot('C:\\work\\demo'), 'C:\\work\\demo\\.dsh\\memory')
-  assert.equal(indexPath(ROOT), `${ROOT}\\${INDEX_FILE}`)
+  assert.equal(memoryRoot(WORKSPACE), ROOT)
+  assert.equal(indexPath(ROOT), join(ROOT, INDEX_FILE))
   assert.equal(isIndexFile('MEMORY.md'), true)
   assert.equal(isIndexFile('memory.md'), false)
 })
 
 test('trashDirPath is a trash subdirectory and evictions keep the newest 50', () => {
-  assert.equal(trashDirPath(ROOT), `${ROOT}\\${TRASH_DIR}`)
+  assert.equal(trashDirPath(ROOT), join(ROOT, TRASH_DIR))
   assert.equal(TRASH_DIR, 'trash')
   assert.equal(TRASH_KEEP, 50)
 
@@ -96,11 +101,11 @@ test('fact names are lowercase kebab and never collide with the index', () => {
 })
 
 test('safeMemoryPath accepts only the index or a valid fact file', () => {
-  assert.equal(safeMemoryPath(ROOT, 'MEMORY.md'), `${ROOT}\\MEMORY.md`)
-  assert.equal(safeMemoryPath(ROOT, 'prefers-tabs.md'), `${ROOT}\\prefers-tabs.md`)
+  assert.equal(safeMemoryPath(ROOT, 'MEMORY.md'), join(ROOT, 'MEMORY.md'))
+  assert.equal(safeMemoryPath(ROOT, 'prefers-tabs.md'), join(ROOT, 'prefers-tabs.md'))
   assert.equal(safeMemoryPath(ROOT, '../secret.md'), undefined)
   assert.equal(safeMemoryPath(ROOT, 'sub/prefers-tabs.md'), undefined)
-  assert.equal(safeMemoryPath(ROOT, 'C:\\windows\\evil.md'), undefined)
+  assert.equal(safeMemoryPath(ROOT, OUTSIDE), undefined)
   assert.equal(safeMemoryPath(ROOT, 'prefers-tabs'), undefined)
   assert.equal(safeMemoryPath('', 'MEMORY.md'), undefined)
 })

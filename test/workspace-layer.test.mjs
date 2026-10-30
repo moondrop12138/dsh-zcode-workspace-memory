@@ -105,6 +105,22 @@ async function waitFor(predicate, timeoutMs = 3000) {
   }
 }
 
+/**
+ * Poll an async reader until its value satisfies `predicate` and return that
+ * value. Index rewrites land a tick after the fact files on a loaded runner, so
+ * a single `readFile` after a fact appears is a race.
+ */
+async function waitForValue(read, predicate, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  let value = await read()
+  while (!predicate(value)) {
+    if (Date.now() > deadline) return value
+    await new Promise((done) => setTimeout(done, 10))
+    value = await read()
+  }
+  return value
+}
+
 function factFrontmatter(name, description, type) {
   return '---\nname: ' + name + '\ndescription: ' + description
     + '\nmetadata:\n  node_type: memory\n  type: ' + type + '\n---\nbody\n'
@@ -174,8 +190,14 @@ test('a fact learned in one workspace is never injected into another', async () 
     // Both facts — the user preference and the project rule — land in the one
     // workspace memory directory.
     assert.equal(await waitFor(() => existsSync(join(workspaceA, '.dsh', 'memory', 'likes-tabs.md'))), true)
-    assert.equal(existsSync(join(workspaceA, '.dsh', 'memory', 'proj-convention.md')), true)
-    const indexA = await readFile(join(workspaceA, '.dsh', 'memory', 'MEMORY.md'), 'utf8')
+    assert.equal(await waitFor(() => existsSync(join(workspaceA, '.dsh', 'memory', 'proj-convention.md'))), true)
+    // The index rewrite trails the second fact file by a tick on a loaded CI
+    // runner, so poll the index instead of reading it once.
+    const indexPathA = join(workspaceA, '.dsh', 'memory', 'MEMORY.md')
+    const indexA = await waitForValue(
+      () => readFile(indexPathA, 'utf8').catch(() => ''),
+      (text) => /likes-tabs/.test(text) && /proj-convention/.test(text),
+    )
     assert.match(indexA, /likes-tabs/)
     assert.match(indexA, /proj-convention/)
 
@@ -238,7 +260,10 @@ test('forget moves the fact to the workspace trash and leaves nothing behind', a
     playTurn(harness, 'Forget the shared fact')
 
     assert.equal(await waitFor(() => existsSync(join(memoryDir, 'shared-fact.md')) === false), true)
-    const index = await readFile(join(memoryDir, 'MEMORY.md'), 'utf8')
+    const index = await waitForValue(
+      () => readFile(join(memoryDir, 'MEMORY.md'), 'utf8').catch(() => ''),
+      (text) => !text.includes('shared-fact'),
+    )
     assert.equal(index.includes('shared-fact'), false)
     // Trash, never a delete: the bytes survive under the same workspace root.
     const trashEntries = await readdir(join(memoryDir, 'trash'), { recursive: true })
