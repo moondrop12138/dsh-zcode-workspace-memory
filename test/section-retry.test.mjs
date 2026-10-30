@@ -4,9 +4,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { apply, sectionRetryStateOf } from '../lib/host.js'
+import { apply, sectionRetryStateOf, __internals } from '../lib/host.js'
 
-const LOG_PATH = join(tmpdir(), 'workspace-memory-host.log')
+const { journalPath, setJournalPath } = __internals
+
+// This file asserts on the Host journal; give it a journal of its own so the
+// rotation and extraction test files cannot rename its lines away (each test
+// file runs in its own process).
+setJournalPath(join(tmpdir(), 'wm-section-retry-' + process.pid + '.log'))
+
+const LOG_PATH = journalPath()
 
 /** Minimal in-memory filesystem implementing the `ctx.fs` subset used here. */
 function createFakeFs() {

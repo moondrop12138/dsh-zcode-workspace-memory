@@ -17,9 +17,14 @@ import { test } from 'node:test'
 
 import { apply, sectionRetryStateOf, __internals } from '../lib/host.js'
 
-const { refreshAgentSection } = __internals
+const { refreshAgentSection, journalPath, setJournalPath } = __internals
 
-const LOG_PATH = join(tmpdir(), 'workspace-memory-host.log')
+// This file asserts on the Host journal; give it a journal of its own so the
+// rotation and extraction test files cannot rename its lines away (each test
+// file runs in its own process).
+setJournalPath(join(tmpdir(), 'wm-section-refresh-' + process.pid + '.log'))
+
+const LOG_PATH = journalPath()
 
 /** Minimal in-memory filesystem implementing the `ctx.fs` subset used here. */
 function createFakeFs() {

@@ -7,7 +7,15 @@ import { test } from 'node:test'
 
 import { __internals } from '../lib/host.js'
 
-const { log, debug, LOG_PATH, LOG_ROTATED_PATH, LOG_ROTATE_BYTES } = __internals
+const { log, debug, journalPath, rotatedJournalPath, setJournalPath, LOG_ROTATE_BYTES } = __internals
+
+// This file rotates a journal on purpose, so it owns a journal of its own:
+// rotating the default temp file would rename lines away from the other test
+// files that assert on it (each test file runs in its own process).
+setJournalPath(join(tmpdir(), 'wm-log-rotation-' + process.pid + '.log'))
+
+const LOG_PATH = journalPath()
+const LOG_ROTATED_PATH = rotatedJournalPath()
 
 /** Reset the journal and its previous generation before each scenario. */
 async function resetLog() {
@@ -30,9 +38,7 @@ test('a journal past 1 MiB rotates to .log.1 and keeps one generation', async ()
       assert.ok(fresh.length < LOG_ROTATE_BYTES, 'the fresh file starts small')
     }
     // One generation only: .log.1 holds the *previous* journal, never an
-    // accumulation of older rounds. Size is deliberately not asserted here —
-    // every test file in this run appends to the same journal path in tmpdir,
-    // so a byte count is no stable property.
+    // accumulation of older rounds.
     const lastGeneration = readFileSync(LOG_ROTATED_PATH, 'utf8')
     assert.ok(lastGeneration.includes('round 1'), 'the newest oversized file is the retained generation')
     assert.ok(!lastGeneration.includes('round 0'), 'the older generation was replaced, not shifted')

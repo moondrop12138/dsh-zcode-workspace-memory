@@ -40,6 +40,7 @@ const {
   isCompletedTurn,
   isEligibleSession,
   isSubagentSession,
+  journalPath,
   maxIndexChars,
   newTurnBuffer,
   normalizePathKey,
@@ -49,12 +50,18 @@ const {
   resetWorkspaceActivities,
   schemaEntryCandidates,
   sessionIdOf,
+  setJournalPath,
   tailWithinBytes,
   workspaceActivitiesOf,
   workspaceBudgetOf,
   workspaceLockSize,
   workspaceRootOf,
 } = __internals
+
+// Several cases here assert on the Host journal, and so do the section and
+// rotation test files. A journal of this file's own keeps them from rotating
+// each other's lines away (each test file runs in its own process).
+setJournalPath(join(tmpdir(), 'wm-extraction-' + process.pid + '.log'))
 
 // The fixtures build real path key shapes through `node:path`, so they must be
 // absolute for the *host* platform: Windows keeps a drive-letter root, POSIX
@@ -855,7 +862,7 @@ test('repairIndex stops reading when the per-file read budget runs out', async (
     // rebuild keeps that one pointer and stops before the remaining three.
     const exhausted = await repairIndex(plugin, fs, record, '', 10)
     assert.deepEqual(exhausted, { text: '- [Fact 0](fact-0.md) \u2014 d\n', added: 1 })
-    const journal = await readFile(join(tmpdir(), 'workspace-memory-host.log'), 'utf8')
+    const journal = await readFile(journalPath(), 'utf8')
     assert.match(journal, /index repair budget of 10ms exhausted; 1 of 4 pointer\(s\) rebuilt/)
 
     // No budget pressure at all: every missing pointer is rebuilt.
@@ -1012,7 +1019,10 @@ test('forget moves the fact into trash and keeps the manifest clean', async () =
       data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'Forgotten.' }] } },
     })
     emit('session/event', agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
-    assert.equal(await waitFor(() => existsSync(join(trashDir, 'stale-fact.md'))), true)
+    // The move is copy-then-unlink, so the trash copy can exist for a tick
+    // while the original is still there; wait for the settle, not the copy.
+    assert.equal(await waitFor(() =>
+      existsSync(join(trashDir, 'stale-fact.md')) && existsSync(join(memoryDir, 'stale-fact.md')) === false), true)
 
     // The extraction ran and only forgot.
     assert.equal(calls.llm.length, 1)
@@ -1148,7 +1158,7 @@ test('a failed fact write aborts the batch before the index or the forgets move'
     assert.equal(calls.llm.length, 1)
 
     // The journal carries the failure reason.
-    const journal = await readFile(join(tmpdir(), 'workspace-memory-host.log'), 'utf8')
+    const journal = await readFile(journalPath(), 'utf8')
     assert.match(journal, /failed to write a4-second-fact\.md/)
     assert.match(journal, /a4 injected write failure/)
     ctxRef.disposeAll()
@@ -1227,7 +1237,7 @@ test('a failed index write leaves the forgets untouched', async () => {
     assert.equal(await readFile(join(memoryDir, 'MEMORY.md.prev'), 'utf8'), originalIndex)
     assert.equal(calls.llm.length, 1)
 
-    const journal = await readFile(join(tmpdir(), 'workspace-memory-host.log'), 'utf8')
+    const journal = await readFile(journalPath(), 'utf8')
     assert.match(journal, /failed to update MEMORY\.md/)
     assert.match(journal, /a4 injected index failure/)
     ctxRef.disposeAll()
@@ -1462,7 +1472,7 @@ test('a reached daily limit skips the extraction and logs the skip', async () =>
     await new Promise((done) => setTimeout(done, 80))
     assert.equal(calls.llm.length, 1)
     assert.equal(fs.writes.filter((write) => write.path.endsWith('turn-fact.md')).length, 1)
-    const journal = await readFile(join(tmpdir(), 'workspace-memory-host.log'), 'utf8')
+    const journal = await readFile(journalPath(), 'utf8')
     assert.match(journal, /extraction skipped for sess_budget \(daily limit reached: 1\/1 today\)/)
   } finally {
     ctxRef.disposeAll()
@@ -1482,7 +1492,7 @@ test('a too-recent min interval skips, then a later turn extracts again', async 
     emitBudgetTurn(ctxRef, agent, 2)
     await new Promise((done) => setTimeout(done, 80))
     assert.equal(calls.llm.length, 1)
-    const journal = await readFile(join(tmpdir(), 'workspace-memory-host.log'), 'utf8')
+    const journal = await readFile(journalPath(), 'utf8')
     assert.match(journal, /extraction skipped for sess_budget \(min interval not elapsed: \d+ms < 60000ms\)/)
 
     // Rewind the recorded time so the next turn passes the gate again.
